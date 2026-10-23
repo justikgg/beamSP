@@ -32,13 +32,18 @@ class GPRModel(BaseModel):
         self.n_restarts_optimizer = n_restarts_optimizer
         self._scaler = StandardScaler()
         self._gp = None
+        self._seed = 42
+
+    def set_seed(self, seed):
+        self._seed = seed
+        return self
 
     def fit(self, X, y):
         Xs = self._scaler.fit_transform(X)
         kernel = _build_kernel(self.kernel_type, Xs.shape[1])
         self._gp = GaussianProcessRegressor(
             kernel=kernel, normalize_y=True,
-            n_restarts_optimizer=self.n_restarts_optimizer, random_state=42,
+            n_restarts_optimizer=self.n_restarts_optimizer, random_state=self._seed,
         )
         self._gp.fit(Xs, y)
         return self

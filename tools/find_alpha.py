@@ -4,7 +4,8 @@ from pathlib import Path
 import numpy as np
 
 from config import settings as cfg
-from core.data.loader import load_dataset
+from core.data.loader import load_dataset_bundle
+from core.data.cli import add_dataset_arguments, dataset_from_args, select_targets, synthesis_from_args
 from core.evaluation.runner import prepare
 from core.evaluation.validation import leave_one_group_out
 from core.evaluation.metrics import compute_metrics
@@ -27,11 +28,12 @@ def _n_nonzero(make, X, y, alpha):
     inner = make(alpha).fit(X, y)._m.steps[-1][1]
     return int(np.sum(np.abs(inner.coef_) > 1e-8))
 
-def sweep(make, target_col, alphas, synth_cfg, seed, count_features=False):
-    df, groups = prepare(load_dataset(cfg.DATA_PATH), cfg.FEATURES, synth_cfg, seed)
-    X = df[cfg.FEATURES].to_numpy(float)
+def sweep(make, target_col, alphas, synth_cfg, seed, count_features=False, dataset=None):
+    dataset = dataset or load_dataset_bundle(cfg.DATA_PATH)
+    df, groups = prepare(dataset.frame, synth_cfg=synth_cfg, seed=seed, schema=dataset.schema)
+    X = df[dataset.schema.features].to_numpy(float)
     y = df[target_col].to_numpy(float)
-    is_synth = df["is_synth"].to_numpy(bool)
+    is_synth = np.asarray(df.attrs["beamsp_synthetic"], bool)
 
     out = []
     for a in alphas:
@@ -100,7 +102,8 @@ def build_figure(results, alphas, title):
 def main(argv=None):
     p = argparse.ArgumentParser(description="Подбор alpha для Ridge/Lasso/ElasticNet (LOGO)")
     p.add_argument("--model", choices=list(MODELS), default="ridge")
-    p.add_argument("--target", choices=list(cfg.TARGETS) + ["both"], default="both")
+    p.add_argument("--target", default="both")
+    add_dataset_arguments(p)
     p.add_argument("--alphas", help="список через запятую, напр. 0.1,0.3,1")
     p.add_argument("--l1-ratio", type=float, default=0.5, help="баланс L1/L2 для ElasticNet (0..1, по умолчанию 0.5)")
     p.add_argument("--no-synth", action="store_true", help="отключить синтез")
@@ -109,6 +112,8 @@ def main(argv=None):
     p.add_argument("--plot", action="store_true", help="сохранить график")
     p.add_argument("--out", type=Path, help="путь для графика (подразумевает --plot)")
     args = p.parse_args(argv)
+    runtime = dataset_from_args(args)
+    select_targets(runtime.schema, args.target)
 
     model_cls = MODELS[args.model]
     show_features = args.model in SELECTS_FEATURES
@@ -119,12 +124,9 @@ def main(argv=None):
         return model_cls(alpha=alpha)
 
     alphas = ([float(x) for x in args.alphas.split(",")] if args.alphas else DEFAULT_ALPHAS[args.model])
-    targets = (list(cfg.TARGETS) if args.target == "both" else [args.target])
+    targets = (list(runtime.schema.targets) if args.target == "both" else [args.target])
 
-    synth_cfg = dict(cfg.SYNTH)
-    synth_cfg["noise"] = dict(cfg.SYNTH["noise"])
-    if args.no_synth: synth_cfg["enabled"] = False
-    if args.samples is not None: synth_cfg["samples_per_profile"] = args.samples
+    synth_cfg = synthesis_from_args(args, runtime.schema)
 
     mlabel = method_label(args.model) or args.model
     suffix = f", l1_ratio={args.l1_ratio}" if is_enet else ""
@@ -134,7 +136,7 @@ def main(argv=None):
     results = {}
     best = {}
     for tkey in targets:
-        rows = sweep(make, cfg.TARGETS[tkey], alphas, synth_cfg, args.seed, count_features=show_features)
+        rows = sweep(make, runtime.schema.targets[tkey], alphas, synth_cfg, args.seed, count_features=show_features, dataset=runtime)
         results[tkey] = rows
         best[tkey] = _print_table(tkey, rows, show_features)[0]
 

@@ -14,5 +14,9 @@ class GBRModel(BaseModel):
     def fit(self, X, y):
         self._m.fit(X, y); return self
 
+    def set_seed(self, seed):
+        self._m.set_params(random_state=seed)
+        return self
+
     def predict(self, X):
         return self._m.predict(X)

@@ -1,4 +1,5 @@
 import sys
+from copy import deepcopy
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import QComboBox
@@ -8,40 +9,39 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QCheckBox, QTreeWidget, QTreeWidgetItem, QSpinBox, QDoubleSpinBox, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QTabWidget, QProgressBar, QSplitter,
+    QMessageBox,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
 from config import settings as cfg
 from core import reporting
-from core import labels as labels_mod
 from core.evaluation.runner import run
 from core.formula.power_law import PowerLawForm
 from core.labels import GROUP_LABELS, GROUP_ORDER, method_label, target_label
-import core.models.registry as registry
 from core.models.registry import available_models, model_class
 from core.models.bioinspired.formula_search import FormulaSearchModel
 from core.models.bioinspired.optimizers import OPTIMIZERS
+from core.data.loader import load_dataset_bundle
+from core.data.schema import Dataset
+from entrypoint.dataset_panel import DatasetPanel
 
 
-
-FIXABLE_FEATURES = [
-    ("a_h0", "a/h0 (относительный пролёт среза)", 0.0),
-    ("H", "H — высота двутавра, мм", 1.0),
-    ("s", "s — толщина стенки, мм", 1.0),
-    ("R", "R — предел прочности, МПа", 1.0),
-    ("E", "E — модуль упругости, МПа", 0.0),
-]
 
 BIO_METHOD_NAMES = {f"bio_{opt}" for opt in OPTIMIZERS}
 
 HELP_HTML = """
 <h3>Как пользоваться</h3>
 <ol>
-<li><b>Целевая величина</b> — считать вклад двутавра Q<sub>дв</sub> по СП 63.13330,
-по руководству 1978 г., или сразу по обеим (для сравнения).</li>
-<li><b>Методы</b> — можно выбрать несколько сразу (Ctrl/Shift + клик), тогда
-в результатах они будут показаны рядом для сравнения. Список сгруппирован
-по типу метода.</li>
+<li><b>Датасет</b> — загрузите CSV/XLSX с заголовками, выберите Feature/Target/Group,
+задайте единицы и шум. Без Group отметьте Profile key. Сохраните mapping, чтобы
+использовать его при следующем открытии файла.</li>
+<li><b>Целевая величина</b> — выберите одну или несколько целей из текущей схемы.
+Для старого файла доступны СП 63.13330 и руководство 1978 г.</li>
+<li><b>Методы</b> — можно выбрать несколько сразу, просто кликая по нужным
+строкам (клик в любом месте строки ставит или снимает галочку — Ctrl/Shift
+не нужны), тогда в результатах они будут показаны рядом для сравнения.
+Список сгруппирован по типу метода, группы сворачиваются кликом по
+заголовку.</li>
 <li><b>Фиксация показателей степени</b> — появляется, если среди выбранных
 методов есть биоинспирированные (генетический алгоритм / дифференциальная
 эволюция / рой частиц / CMA-ES). Задайте нужные значения (например
@@ -49,27 +49,52 @@ H = s = R = 1, E = 0), затем отметьте галочкой «+ фикс
 которых хотите дополнительно прогнать зафиксированную версию — обычная
 (свободная) версия остаётся в прогоне, обе строки можно сравнить в
 результатах.</li>
-<li><b>Синтез образцов</b> — добавляет к 6 исходным профилям искусственные
+<li><b>Синтез образцов</b> — добавляет к исходным строкам искусственные
 образцы с небольшим случайным разбросом входов (Q<sub>дв</sub> при этом не
 пересчитывается) для устойчивости моделей, чувствительных к размеру выборки.
 Можно отключить или изменить число образцов на профиль.</li>
-<li><b>Запустить</b> — прогон по схеме Leave-One-Group-Out (обучение на 5
-профилях, проверка на отложенном 6-м). Результат: таблица «метод × метрики»,
+<li><b>Запустить</b> — прогон по схеме Leave-One-Group-Out (обучение на остальных
+профилях, проверка на отложенном). Результат: таблица «метод × метрики»,
 графики предсказание/RMSE и разбивка по профилям, а для методов, выводящих
 явную формулу — отдельная вкладка «Формулы».</li>
-<li><b>Свой датасет</b> — по умолчанию используется встроенная таблица.
-Чтобы подставить свою, положите файл <code>data.xlsx</code> той же структуры
-столбцов рядом с исполняемым файлом (в той же папке, что и .exe) и
-перезапустите программу — она будет использована вместо встроенной.</li>
+<li><b>Экспорт в results/</b> — становится активной после первого прогона.
+Сохраняет сведения о данных в JSON, а результаты рядом с программой (в папку <code>results/</code>) CSV с таблицей
+метрик и PNG с графиками по каждой посчитанной целевой величине, а если
+среди методов были формульные — ещё и PNG со списком формул.</li>
 </ol>
 <h3>Метрики</h3>
 <ul>
-<li><b>Qexp/Qpred_mean</b> — среднее отношение эксперимент/предсказание
-(в идеале ≈ 1), <b>CV</b> — коэффициент вариации этого отношения.</li>
-<li><b>MAE / RMSE / R2</b> — стандартные метрики точности, для полноты
-картины.</li>
-<li><b>overfit</b> = R2_train − R2(LOGO) — насколько модель переобучилась
-на исходных 6 профилях по сравнению с проверкой на отложенном профиле.</li>
+<li><b>Qexp/Qpred_mean</b> — среднее отношение «эксперимент / предсказание»
+по всем образцам (в идеале ≈ 1); систематическое завышение или занижение
+метода сразу видно по отклонению от 1.</li>
+<li><b>CV</b> — коэффициент вариации этого отношения (разброс/среднее):
+насколько стабильно метод предсказывает от образца к образцу.</li>
+<li><b>within15</b> — доля образцов (%), где отношение Qэксп/Qпред попало
+в коридор ±15% от идеального.</li>
+<li><b>MAPE</b> — средняя абсолютная процентная ошибка относительно
+Qэксп.</li>
+<li><b>MAE</b> — средняя абсолютная ошибка в кН.</li>
+<li><b>MedianAE</b> — медианная абсолютная ошибка в кН (устойчивее к
+выбросам, чем MAE).</li>
+<li><b>RMSE</b> — среднеквадратичная ошибка в кН; таблица методов
+отсортирована по этому столбцу.</li>
+<li><b>RMSE_worst</b> — RMSE на самом сложном из отложенных профилей
+(худший случай схемы Leave-One-Group-Out).</li>
+<li><b>MaxError</b> — наибольшая абсолютная ошибка среди всех образцов, кН.</li>
+<li><b>pct_negative</b> — доля предсказаний (%), ушедших в отрицательные
+значения — физически невозможный результат, признак поломки метода на
+конкретных данных.</li>
+<li><b>pct_conservative</b> — доля предсказаний (%), не превышающих
+экспериментальное значение (Qпред ≤ Qэксп) — то есть «в запас», а не
+в опасную сторону завышения несущей способности.</li>
+<li><b>R2</b> — коэффициент детерминации на проверке LOGO (по отложенным
+профилям).</li>
+<li><b>R2_train</b> — тот же R2, но посчитанный на данных, на которых
+финальная модель обучалась (вся выборка) — показывает, насколько хорошо
+метод в принципе способен описать данные.</li>
+<li><b>overfit</b> = R2_train − R2(LOGO) — насколько модель переобучилась:
+большая разница означает, что метод хорошо запоминает исходные профили,
+но плохо обобщается на новый.</li>
 </ul>
 """
 
@@ -87,7 +112,6 @@ def _fixed_bio_class(opt_name, fixed_exponents):
 
 
 class CollapsibleSection(QWidget):
-    
 
     def __init__(self, title, parent=None):
         super().__init__(parent)
@@ -135,17 +159,19 @@ class RunWorker(QThread):
     finished_ok = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, model_names, targets, synth_cfg):
+    def __init__(self, model_names, targets, synth_cfg, dataset, factories=None):
         super().__init__()
         self._model_names = model_names
         self._targets = targets
         self._synth_cfg = synth_cfg
+        self._dataset = dataset
+        self._factories = factories
 
     def run(self):
         try:
             result = run(
-                model_names=self._model_names, feature_cols=cfg.FEATURES,
-                targets=self._targets, data_path=cfg.DATA_PATH,
+                model_names=self._model_names, dataset=self._dataset,
+                targets=self._targets, model_factories=self._factories,
                 synth_cfg=self._synth_cfg, seed=cfg.SEED,
                 progress=lambda d, t, label: self.progress.emit(d, t, label),
             )
@@ -161,20 +187,24 @@ class MainWindow(QMainWindow):
         self.resize(1220, 760)
         self._worker = None
         self._last_result = None
+        self._dataset = load_dataset_bundle(cfg.DATA_PATH)
         self._build_ui()
 
     def _build_ui(self):
         controls = QWidget()
         col = QVBoxLayout(controls)
 
+        self._dataset_panel = DatasetPanel(self._dataset)
+        self._dataset_panel.schema_edited.connect(self._refresh_dataset_controls)
+        self._dataset_panel.dataset_changed.connect(lambda ds: setattr(self, "_dataset", ds))
+        self._dataset_panel.file_loaded.connect(lambda legacy: self._synth_cb.setChecked(legacy))
+        self._dataset_panel.message.connect(lambda msg: self.statusBar().showMessage(msg))
+        col.addWidget(self._dataset_panel)
+
         tgt_box = QGroupBox("Целевая величина")
         tl = QVBoxLayout(tgt_box)
         self._target_boxes = {}
-        for key in cfg.TARGETS:
-            cb = QCheckBox(target_label(key))
-            cb.setChecked(True)
-            self._target_boxes[key] = cb
-            tl.addWidget(cb)
+        self._target_layout = tl
         col.addWidget(tgt_box)
 
         m_box = QGroupBox("Методы (можно несколько)")
@@ -226,21 +256,9 @@ class MainWindow(QMainWindow):
         note.setWordWrap(True)
         self._fix_section.layout_body().addWidget(note)
         self._fix_rows = {}
-        for feat_name, label, default_value in FIXABLE_FEATURES:
-            row = QHBoxLayout()
-            cb = QCheckBox(label)
-            spin = QDoubleSpinBox()
-            spin.setRange(-5.0, 5.0)
-            spin.setSingleStep(0.5)
-            spin.setValue(default_value)
-            spin.setEnabled(False)
-            cb.toggled.connect(spin.setEnabled)
-            cb.toggled.connect(self._refresh_fix_summary)
-            spin.valueChanged.connect(self._refresh_fix_summary)
-            row.addWidget(cb)
-            row.addWidget(spin)
-            self._fix_section.layout_body().addLayout(row)
-            self._fix_rows[feat_name] = (cb, spin)
+        self._fix_features = QWidget()
+        self._fix_features_layout = QVBoxLayout(self._fix_features)
+        self._fix_section.layout_body().addWidget(self._fix_features)
 
         twin_label = QLabel("Прогнать зафиксированную версию рядом с обычной:")
         twin_label.setWordWrap(True)
@@ -265,7 +283,7 @@ class MainWindow(QMainWindow):
         self._synth_cb.toggled.connect(self._refresh_synth_summary)
         self._synth_section.layout_body().addWidget(self._synth_cb)
         srow = QHBoxLayout()
-        srow.addWidget(QLabel("Образцов на профиль:"))
+        srow.addWidget(QLabel("Копий каждой строки:"))
         self._samples_spin = QSpinBox()
         self._samples_spin.setRange(0, 500)
         self._samples_spin.setValue(cfg.SYNTH["samples_per_profile"])
@@ -293,16 +311,59 @@ class MainWindow(QMainWindow):
         self._results.addTab(self._build_help_tab(), "Помощь")
 
         splitter = QSplitter()
-        splitter.addWidget(controls)
+        control_scroll = QScrollArea()
+        control_scroll.setWidgetResizable(True)
+        control_scroll.setWidget(controls)
+        splitter.addWidget(control_scroll)
         splitter.addWidget(self._results)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([330, 890])
         self.setCentralWidget(splitter)
         self.statusBar().showMessage("Готов")
+        self._refresh_dataset_controls(self._dataset.schema)
 
     def _selected_targets(self):
-        return {k: cfg.TARGETS[k] for k, cb in self._target_boxes.items()
+        return {k: self._dataset.schema.targets[k] for k, cb in self._target_boxes.items()
                 if cb.isChecked()}
+
+    def _refresh_dataset_controls(self, schema):
+        selected = {k: cb.isChecked() for k, cb in self._target_boxes.items()}
+        while self._target_layout.count():
+            old = self._target_layout.takeAt(0).widget()
+            old.setParent(None)
+            old.deleteLater()
+        self._target_boxes = {}
+        for key in schema.targets:
+            cb = QCheckBox(target_label(key))
+            cb.setChecked(selected.get(key, True))
+            self._target_boxes[key] = cb
+            self._target_layout.addWidget(cb)
+        previous = {n: (cb.isChecked(), spin.value()) for n, (cb, spin) in self._fix_rows.items()}
+        while self._fix_features_layout.count():
+            old = self._fix_features_layout.takeAt(0).widget()
+            old.setParent(None)
+            old.deleteLater()
+        self._fix_rows = {}
+        for name in schema.features:
+            spec = schema.spec(name)
+            holder = QWidget()
+            row = QHBoxLayout(holder)
+            cb = QCheckBox(spec.display_name or name)
+            spin = QDoubleSpinBox()
+            spin.setRange(-5, 5)
+            spin.setSingleStep(0.5)
+            checked, value = previous.get(name, (False, 0.0))
+            cb.setChecked(checked)
+            spin.setValue(value)
+            spin.setEnabled(checked)
+            cb.toggled.connect(spin.setEnabled)
+            cb.toggled.connect(self._refresh_fix_summary)
+            spin.valueChanged.connect(self._refresh_fix_summary)
+            row.addWidget(cb)
+            row.addWidget(spin)
+            self._fix_features_layout.addWidget(holder)
+            self._fix_rows[name] = (cb, spin)
+        self._refresh_fix_summary()
 
     def _selected_methods(self):
         names = []
@@ -372,27 +433,26 @@ class MainWindow(QMainWindow):
         fixed = {}
         for feat_name, (cb, spin) in self._fix_rows.items():
             if cb.isChecked():
-                fixed[cfg.FEATURES.index(feat_name)] = spin.value()
+                fixed[feat_name] = spin.value()
         return fixed
 
     def _apply_fixation(self, methods, fixed_exponents):
-        """Не заменяет выбранные bio_*-методы, а добавляет к ним fixed-версию
-        для тех, что отмечены галочкой «+ фикс.» — обычная версия остаётся
-        в прогоне, чтобы сравнить обе строки в результатах."""
         if not fixed_exponents:
-            return methods
+            return methods, {}
         extra = []
+        factories = {}
         for name, cb in self._fix_twin_checks.items():
             if not cb.isChecked() or name not in methods:
                 continue
             opt_name = name[len("bio_"):]
             fixed_name = f"bio_{opt_name}_fixed"
-            registry._REGISTRY[fixed_name] = _fixed_bio_class(opt_name, fixed_exponents)
-            labels_mod.MODEL_LABELS[fixed_name] = method_label(name) + " (фикс.)"
+            factories[fixed_name] = _fixed_bio_class(opt_name, fixed_exponents)
             extra.append(fixed_name)
-        return methods + extra
+        return methods + extra, factories
 
     def _on_run(self):
+        if not self._dataset_panel.apply_roles():
+            return
         methods = self._selected_methods()
         targets = self._selected_targets()
         if not methods:
@@ -402,10 +462,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Выберите хотя бы одну цель")
             return
 
-        methods = self._apply_fixation(methods, self._fixed_exponents())
+        methods, factories = self._apply_fixation(methods, self._fixed_exponents())
 
         synth_cfg = dict(cfg.SYNTH)
-        synth_cfg["noise"] = dict(cfg.SYNTH["noise"])
+        synth_cfg["noise"] = self._dataset.schema.noise
         synth_cfg["enabled"] = self._synth_cb.isChecked()
         synth_cfg["samples_per_profile"] = self._samples_spin.value()
 
@@ -413,7 +473,8 @@ class MainWindow(QMainWindow):
         self._progress.setRange(0, 0)
         self.statusBar().showMessage("Запуск…")
 
-        self._worker = RunWorker(methods, targets, synth_cfg)
+        snapshot = Dataset(self._dataset.frame.copy(), deepcopy(self._dataset.schema), self._dataset.source)
+        self._worker = RunWorker(methods, targets, synth_cfg, snapshot, factories)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
@@ -438,11 +499,16 @@ class MainWindow(QMainWindow):
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
         self.statusBar().showMessage(f"Ошибка: {msg}")
+        QMessageBox.warning(self, "Ошибка расчёта", msg)
 
     def _on_export(self):
         if self._last_result is None:
             return
-        saved = reporting.export_results(self._last_result, cfg.RESULTS_DIR)
+        try:
+            saved = reporting.export_results(self._last_result, cfg.RESULTS_DIR)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Ошибка экспорта", str(exc))
+            return
         self.statusBar().showMessage(f"Сохранено в {cfg.RESULTS_DIR}: {len(saved)} файлов")
 
     def _show_results(self, result):
@@ -452,6 +518,11 @@ class MainWindow(QMainWindow):
             tab = QWidget()
             layout = QVBoxLayout(tab)
             layout.addWidget(self._metrics_table(table))
+            notes = reporting.model_notes(result, tkey)
+            if notes:
+                label = QLabel("\n".join(notes))
+                label.setWordWrap(True)
+                layout.addWidget(label)
             figs = QTabWidget()
             figs.addTab(self._prediction_tab(result, tkey), "Предсказание / RMSE")
             fold = reporting.build_fold_rmse_figure(result, tkey)

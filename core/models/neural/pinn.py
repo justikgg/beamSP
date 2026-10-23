@@ -3,8 +3,8 @@ import torch
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
-from config import settings as cfg
 from core.models.base import BaseModel
+from core.data.schema import DatasetError
 
 
 class _PINNNet(nn.Module):
@@ -19,10 +19,6 @@ class _PINNNet(nn.Module):
 
     def forward(self, x):
         return self.net(x)
-
-
-_MONOTONE_UP_FEATURES = ("H", "s", "R")
-_MONOTONE_UP_IDX = tuple(cfg.FEATURES.index(name) for name in _MONOTONE_UP_FEATURES)
 
 
 class PINNModel(BaseModel):
@@ -47,6 +43,10 @@ class PINNModel(BaseModel):
     def fit(self, X, y):
         torch.manual_seed(self._seed)
         X = np.asarray(X, float)
+        self.validate_input(X, y)
+        schema = getattr(self, "dataset_schema", None)
+        monotonic = [(i, schema.spec(n).monotonic) for i, n in enumerate(self.names_for(X))
+                     if schema is not None and schema.spec(n).monotonic]
         y = np.asarray(y, float).reshape(-1, 1)
 
         self._xs = StandardScaler().fit(X)
@@ -69,14 +69,23 @@ class PINNModel(BaseModel):
             q = self._net(coll)
             grad = torch.autograd.grad(q.sum(), coll, create_graph=True)[0]
 
-            mono = grad[:, list(_MONOTONE_UP_IDX)]
-            mono_loss = torch.relu(-mono).pow(2).mean()
+            if monotonic:
+                idx, signs = zip(*monotonic)
+                mono = grad[:, list(idx)] * torch.tensor(signs, dtype=grad.dtype)
+                mono_loss = torch.relu(-mono).pow(2).mean()
+            else:
+                mono_loss = q.new_tensor(0.0)
             nonneg_loss = torch.relu(zero_std - q).pow(2).mean()
             phys_loss = mono_loss + nonneg_loss
 
             (data_loss + self._phys_weight * phys_loss).backward()
             opt.step()
         return self
+
+    def validate_input(self, X, y=None):
+        self.names_for(X)
+        if y is not None and np.any(np.asarray(y) < 0):
+            raise DatasetError("Метод pinn предполагает неотрицательный target (физический штраф Q ≥ 0).")
 
     def predict(self, X):
         X = np.asarray(X, float)

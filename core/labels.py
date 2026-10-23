@@ -24,6 +24,8 @@ MODEL_LABELS = {
     "bio_de": "Степенная: дифференциальная эволюция",
     "bio_pso": "Степенная: рой частиц (PSO)",
     "bio_cmaes": "Степенная: CMA-ES",
+    "log_linear_ls": "Степенная: ограниченный Log-Linear Least Squares",
+    "log_linear_trf": "Степенная: Log-Linear LS + TRF",
     "gbr": "Градиентный бустинг",
     "svr": "Метод опорных векторов (SVR)",
     "knn": "Метод ближайших соседей (KNN)",
@@ -38,6 +40,8 @@ MODEL_LABELS = {
 Q_UNIT = "кН"
 
 def method_label(name):
+    if name.endswith("_fixed") and name[:-6] in MODEL_LABELS:
+        return MODEL_LABELS[name[:-6]] + " (фикс.)"
     return MODEL_LABELS.get(name, name)
 
 

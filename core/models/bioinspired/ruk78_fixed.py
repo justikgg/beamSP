@@ -7,11 +7,11 @@ from core.models.bioinspired.optimizers import OPTIMIZERS
 import core.models.registry as registry
 
 fixed = {
-    cfg.FEATURES.index("a_h0"): 0.0,
-    cfg.FEATURES.index("H"): 1.0,
-    cfg.FEATURES.index("s"): 1.0,
-    cfg.FEATURES.index("R"): 1.0,
-    cfg.FEATURES.index("E"): 0.0,
+    "a_h0": 0.0,
+    "H": 1.0,
+    "s": 1.0,
+    "R": 1.0,
+    "E": 0.0,
 }
 
 
@@ -26,7 +26,7 @@ class FixedBioDERUK78(FormulaSearchModel):
         )
 
 
-registry._REGISTRY["bio_de_ruk78_fixed"] = FixedBioDERUK78
+registry.register_model(FixedBioDERUK78)
 
 from entrypoint._common import run_method
 

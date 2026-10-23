@@ -1,15 +1,14 @@
 import numpy as np
 from sklearn.linear_model import ARDRegression
 
-from config import settings as cfg
 from core.models.base import BaseModel
 
 _REL_THRESHOLD = 0.02
 
 
-def _build_terms(feature_names):
+def _build_terms(feature_names, binary_features=()):
     idx = {name: i for i, name in enumerate(feature_names)}
-    positive = [n for n in feature_names if n != "is_steel"]
+    positive = [n for n in feature_names if n not in binary_features]
     terms = []
 
     for n in feature_names:                       
@@ -47,13 +46,14 @@ class _BayesianFormula:
         return self._model.predict(self._design(np.asarray(X, float)))
 
 
-def fit_bayesian_symbolic(X, y, feature_names=None, seed=42, threshold_lambda=10000.0):
+def fit_bayesian_symbolic(X, y, feature_names=None, seed=42, threshold_lambda=10000.0,
+                         binary_features=()):
     X = np.asarray(X, float)
     y = np.asarray(y, float)
     if feature_names is None:
         feature_names = [f"x{i}" for i in range(X.shape[1])]
 
-    terms = _build_terms(feature_names)
+    terms = _build_terms(feature_names, binary_features)
     M = np.column_stack([f(X) for _, f in terms])
 
 
@@ -104,9 +104,11 @@ class BayesianSymbolicRegressionModel(BaseModel):
         return self
 
     def fit(self, X, y):
+        schema = getattr(self, "dataset_schema", None)
+        binary = [n for n in self.names_for(X) if schema is not None and schema.spec(n).dtype == "binary"]
         self._wrapper, self._formula = fit_bayesian_symbolic(
-            X, y, feature_names=list(cfg.FEATURES), seed=self._seed,
-            threshold_lambda=self.threshold_lambda)
+            X, y, feature_names=self.names_for(X), seed=self._seed,
+            threshold_lambda=self.threshold_lambda, binary_features=binary)
         return self
 
     def predict(self, X):

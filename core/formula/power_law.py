@@ -1,4 +1,5 @@
 import numpy as np
+from core.data.schema import DatasetError
 
 
 class PowerLawForm:
@@ -11,12 +12,28 @@ class PowerLawForm:
         self._free_mask = None
         self._fixed_vals = None
 
-    def usable_features(self, X):
-        used_idx = np.where(X.min(axis=0) > 0)[0]
+    def usable_features(self, X, names=None, allowed=None):
+        names = names or [f"x{i}" for i in range(X.shape[1])]
+        fixed = {}
+        for key, value in self._fixed_exponents.items():
+            if isinstance(key, str):
+                if key not in names:
+                    raise DatasetError(f"Фиксация степени: feature {key} отсутствует среди выбранных признаков.")
+                key = names.index(key)
+            if key < 0 or key >= len(names) or not np.isfinite(value):
+                raise DatasetError("Некорректный индекс или значение фиксированной степени.")
+            fixed[key] = value
+        used_idx = np.asarray(allowed if allowed is not None else range(X.shape[1]), dtype=int)
+        for i in used_idx:
+            if np.any(X[:, i] <= 0):
+                raise DatasetError(f"Степенной метод не может использовать feature {names[i]}: присутствуют неположительные значения.")
+        for i, value in fixed.items():
+            if i not in used_idx and value != 0:
+                raise DatasetError(f"Feature {names[i]} исключён из степенной формулы; нельзя фиксировать ненулевую степень.")
         self._used_idx = used_idx
-        self._free_mask = np.array([i not in self._fixed_exponents for i in used_idx])
+        self._free_mask = np.array([i not in fixed for i in used_idx], dtype=bool)
         self._fixed_vals = np.array(
-            [self._fixed_exponents.get(i, 0.0) for i in used_idx], dtype=float)
+            [fixed.get(i, 0.0) for i in used_idx], dtype=float)
         return used_idx
 
     def _expand(self, free_params):
@@ -30,7 +47,7 @@ class PowerLawForm:
 
     def objective(self, Xu, y):
         logX = np.log(Xu)
-        log_y = np.log(np.clip(y, 1e-9, None))
+        log_y = np.log(y)
 
         def mse(params):
             powers = self._expand(params[1:])
@@ -48,4 +65,4 @@ class PowerLawForm:
         a = np.exp(params[0])
         powers = self._expand(params[1:])
         terms = [f"{name}^{p:.3f}" for name, p in zip(names, powers)]
-        return f"{target} = {a:.4g} * " + " * ".join(terms)
+        return f"{target} = {a:.4g}" + (" * " + " * ".join(terms) if terms else "")

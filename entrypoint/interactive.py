@@ -1,11 +1,13 @@
 import os
 import sys
+import argparse
 
 from config import settings as cfg
 from core.evaluation.runner import run
 from core.labels import method_label, target_label
 from core.models.registry import available_models
 from core.reporting import print_report, export_results, build_formulas_figure
+from core.data.cli import add_dataset_arguments, dataset_from_args
 
 
 def _prompt(text, default):
@@ -30,12 +32,12 @@ def _ask_int(text, default):
             print("  нужно целое число, попробуй ещё раз")
 
 
-def _choose_target():
-    keys = list(cfg.TARGETS)
+def _choose_target(schema):
+    keys = list(schema.targets)
     print("\nЦелевая величина:")
     for i, k in enumerate(keys, 1):
         print(f"  {i}) {target_label(k)}")
-    print(f"  {len(keys) + 1}) обе")
+    print(f"  {len(keys) + 1}) все цели")
     raw = _prompt("выбор", len(keys) + 1)
     try:
         idx = int(raw)
@@ -43,8 +45,8 @@ def _choose_target():
         idx = len(keys) + 1
     if 1 <= idx <= len(keys):
         k = keys[idx - 1]
-        return {k: cfg.TARGETS[k]}
-    return dict(cfg.TARGETS)
+        return {k: schema.targets[k]}
+    return dict(schema.targets)
 
 
 def _choose_models():
@@ -66,12 +68,12 @@ def _choose_models():
     return chosen or names
 
 
-def _configure():
-    targets = _choose_target()
+def _configure(dataset):
+    targets = _choose_target(dataset.schema)
     model_names = _choose_models()
 
     synth_cfg = dict(cfg.SYNTH)
-    synth_cfg["noise"] = dict(cfg.SYNTH["noise"])
+    synth_cfg["noise"] = dataset.schema.noise
     synth_cfg["enabled"] = _ask_yes_no("\nВключить синтез образцов?",
                                        cfg.SYNTH["enabled"])
     if synth_cfg["enabled"]:
@@ -83,8 +85,8 @@ def _configure():
     return targets, model_names, synth_cfg, do_export
 
 
-def _run_once():
-    targets, model_names, synth_cfg, do_export = _configure()
+def _run_once(dataset):
+    targets, model_names, synth_cfg, do_export = _configure(dataset)
 
     print("\n" + "=" * 70)
     print("Запуск:", ", ".join(method_label(m) or m for m in model_names),
@@ -95,8 +97,8 @@ def _run_once():
         print(f"[{done}/{total}] {label}")
 
     result = run(
-        model_names=model_names, feature_cols=cfg.FEATURES, targets=targets,
-        data_path=cfg.DATA_PATH, synth_cfg=synth_cfg, seed=cfg.SEED,
+        model_names=model_names, targets=targets,
+        dataset=dataset, synth_cfg=synth_cfg, seed=cfg.SEED,
         progress=progress,
     )
     print_report(result)
@@ -122,12 +124,15 @@ def _run_once():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="beamSP: интерактивное исследование")
+    add_dataset_arguments(parser)
+    dataset = dataset_from_args(parser.parse_args())
     print("=" * 70)
     print("Вклад двутавра Qдв")
     print("=" * 70)
     try:
         while True:
-            _run_once()
+            _run_once(dataset)
             if not _ask_yes_no("\nЗапустить ещё раз с другими параметрами?", False):
                 break
     except (KeyboardInterrupt, EOFError):

@@ -4,7 +4,8 @@ from pathlib import Path
 import numpy as np
 
 from config import settings as cfg
-from core.data.loader import load_dataset
+from core.data.loader import load_dataset_bundle
+from core.data.cli import add_dataset_arguments, dataset_from_args, select_targets, synthesis_from_args
 from core.evaluation.runner import prepare
 from core.evaluation.validation import leave_one_group_out
 from core.evaluation.metrics import compute_metrics
@@ -29,11 +30,12 @@ def _num(s):
     return s
 
 
-def sweep(param, values, fixed, target_col, synth_cfg, seed):
-    df, groups = prepare(load_dataset(cfg.DATA_PATH), cfg.FEATURES, synth_cfg, seed)
-    X = df[cfg.FEATURES].to_numpy(float)
+def sweep(param, values, fixed, target_col, synth_cfg, seed, dataset=None):
+    dataset = dataset or load_dataset_bundle(cfg.DATA_PATH)
+    df, groups = prepare(dataset.frame, synth_cfg=synth_cfg, seed=seed, schema=dataset.schema)
+    X = df[dataset.schema.features].to_numpy(float)
     y = df[target_col].to_numpy(float)
-    is_synth = df["is_synth"].to_numpy(bool)
+    is_synth = np.asarray(df.attrs["beamsp_synthetic"], bool)
 
     def make(v):
         kwargs = dict(fixed)
@@ -107,24 +109,24 @@ def main(argv=None):
     p.add_argument("--C", default=10.0, help="фиксированное C, если не он перебирается")
     p.add_argument("--epsilon", default=0.1, help="фиксированный epsilon, если не он перебирается")
     p.add_argument("--gamma", default="scale", help="фиксированный gamma, если не он перебирается")
-    p.add_argument("--target", choices=list(cfg.TARGETS) + ["both"], default="both")
+    p.add_argument("--target", default="both")
+    add_dataset_arguments(p)
     p.add_argument("--no-synth", action="store_true", help="отключить синтез")
     p.add_argument("--samples", type=int, help="образцов синтеза на профиль")
     p.add_argument("--seed", type=int, default=cfg.SEED)
     p.add_argument("--plot", action="store_true", help="сохранить график")
     p.add_argument("--out", type=Path, help="путь для графика (подразумевает --plot)")
     args = p.parse_args(argv)
+    runtime = dataset_from_args(args)
+    select_targets(runtime.schema, args.target)
 
     values = ([_num(v) for v in args.values.split(",")] if args.values
               else DEFAULT_VALUES[args.param])
     fixed = {"C": _num(args.C), "epsilon": _num(args.epsilon), "gamma": _num(args.gamma)}
     fixed.pop(args.param)
-    targets = (list(cfg.TARGETS) if args.target == "both" else [args.target])
+    targets = (list(runtime.schema.targets) if args.target == "both" else [args.target])
 
-    synth_cfg = dict(cfg.SYNTH)
-    synth_cfg["noise"] = dict(cfg.SYNTH["noise"])
-    if args.no_synth: synth_cfg["enabled"] = False
-    if args.samples is not None: synth_cfg["samples_per_profile"] = args.samples
+    synth_cfg = synthesis_from_args(args, runtime.schema)
 
     mlabel = method_label("svr")
     fixed_str = ", ".join(f"{k}={v}" for k, v in fixed.items())
@@ -134,7 +136,7 @@ def main(argv=None):
     results = {}
     best = {}
     for tkey in targets:
-        rows = sweep(args.param, values, fixed, cfg.TARGETS[tkey], synth_cfg, args.seed)
+        rows = sweep(args.param, values, fixed, runtime.schema.targets[tkey], synth_cfg, args.seed, dataset=runtime)
         results[tkey] = rows
         best[tkey] = _print_table(tkey, rows, args.param)[0]
 

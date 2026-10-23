@@ -2,6 +2,8 @@ from core.models.baseline.elastic_net import ElasticNetModel
 from core.models.baseline.linear import LinearModel
 from core.models.baseline.ridge import RidgeModel
 from core.models.baseline.lasso import LassoModel
+from core.models.baseline.log_linear_ls import LogLinearLSModel
+from core.models.baseline.log_linear_trf import LogLinearTRFModel
 from core.models.classic_ml.gbr import GBRModel
 from core.models.classic_ml.gpr import GPRModel
 from core.models.classic_ml.knn import KNNModel
@@ -15,7 +17,8 @@ from core.models.sym_regression.symbolic_regression import SymbolicRegressionMod
 
 _BASELINE = [LinearModel, RidgeModel, LassoModel, ElasticNetModel]
 _CLASSIC = [GBRModel, SVRModel, KNNModel, GPRModel]
-_FORMULA = [SymbolicRegressionModel, BayesianSymbolicRegressionModel]
+_FORMULA = [SymbolicRegressionModel, BayesianSymbolicRegressionModel,
+            LogLinearLSModel, LogLinearTRFModel]
 _NEURAL = [PINNModel, MLPModel]
 _EXPERIMENTAL = [ActorCriticRegressor]
 
@@ -36,3 +39,14 @@ def get_model(name):
 
 def available_models():
     return list(_REGISTRY)
+
+
+def register_model(cls, *, replace=False):
+    """Register a BaseModel class; the Research GUI lists it automatically."""
+    from core.models.base import BaseModel
+    if not issubclass(cls, BaseModel) or cls.name == "base":
+        raise ValueError("Зарегистрируйте класс BaseModel с уникальным name.")
+    if cls.name in _REGISTRY and not replace:
+        raise ValueError(f"Модель {cls.name} уже зарегистрирована.")
+    _REGISTRY[cls.name] = cls
+    return cls

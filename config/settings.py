@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from core.data.legacy import LEGACY_FEATURES, LEGACY_TARGETS, LEGACY_NOISE
 
 if getattr(sys, "frozen", False):
     ROOT = Path(sys._MEIPASS)
@@ -13,21 +14,14 @@ else:
     DATA_PATH = ROOT / "config" / "data.xlsx"
 
 SEED = 1337
-FEATURES = ["a_h0", "is_steel", "H", "s", "R", "E"]
-TARGETS = {
-    "SP63": "Qдв_СП63",
-    "RUK78": "Qдв_рук78",
-}
+# Deprecated compatibility aliases; runtime code uses DatasetSchema.
+FEATURES = list(LEGACY_FEATURES)
+TARGETS = dict(LEGACY_TARGETS)
 
 SYNTH = {
     "enabled": True,
     "samples_per_profile": 15,
-    "noise": {
-        "H": 3.0,
-        "s": 0.3,
-        "R": 3.0,
-        "E": 50.0,
-    },
+    "noise": dict(LEGACY_NOISE),
 }
 ACTIVE_MODELS = [
     "linear",

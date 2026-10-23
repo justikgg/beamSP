@@ -3,6 +3,7 @@ import numpy as np
 from core.models.base import BaseModel
 from core.formula.power_law import PowerLawForm
 from core.models.bioinspired.optimizers import OPTIMIZERS
+from core.data.schema import DatasetError
 
 
 class FormulaSearchModel(BaseModel):
@@ -23,7 +24,8 @@ class FormulaSearchModel(BaseModel):
     def fit(self, X, y):
         X = np.asarray(X, float)
         y = np.asarray(y, float)
-        self._used_idx = self._form.usable_features(X)
+        self.validate_input(X, y)
+        self._used_idx = self._form.usable_features(X, self.names_for(X), self._allowed_indices(X))
         Xu = X[:, self._used_idx]
 
         objective = self._form.objective(Xu, y)
@@ -32,6 +34,7 @@ class FormulaSearchModel(BaseModel):
         return self
 
     def predict(self, X):
+        self.validate_input(np.asarray(X, float))
         Xu = np.asarray(X, float)[:, self._used_idx]
         return self._form.predict(self._params, Xu)
 
@@ -43,6 +46,19 @@ class FormulaSearchModel(BaseModel):
         else:
             names = [f"x{i}" for i in self._used_idx]
         return self._form.render(self._params, names)
+
+    def _allowed_indices(self, X):
+        schema = getattr(self, "dataset_schema", None)
+        return [i for i, name in enumerate(self.names_for(X))
+                if schema is None or schema.spec(name).formula_allowed]
+
+    def validate_input(self, X, y=None):
+        names = self.names_for(X)
+        for i in self._allowed_indices(X):
+            if np.any(X[:, i] <= 0):
+                raise DatasetError(f"Метод {self.name} не может использовать feature {names[i]}: присутствуют неположительные значения.")
+        if y is not None and np.any(y <= 0):
+            raise DatasetError(f"Метод {self.name} требует положительные значения target.")
 
 
 def power_law_model(opt_name):

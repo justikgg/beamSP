@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "beam-sp"
-version = "0.3.0"
+version = "0.18.0"
 description = "Восстановление вклада двутавра Qдв методами ML и биоинспирированной оптимизации"
 requires-python = ">=3.12"
 dependencies = [
     "gplearn",
     "numpy",
+    "scipy",
     "pandas",
     "scikit-learn<1.6",
     "openpyxl",

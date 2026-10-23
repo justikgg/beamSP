@@ -50,6 +50,7 @@ def to_mathtext(expr):
 
     s = s.replace("*", r"\cdot ")
 
-    s = s.replace("Qдв", r"Q_{дв}")
+    s = re.sub(r"Qдв(?:_(\w+))?",
+               lambda m: "Q_{дв" + ("," + m.group(1).replace("_", r"\_") if m.group(1) else "") + "}", s)
 
     return f"${s}$"

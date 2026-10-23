@@ -1,6 +1,5 @@
 from gplearn.genetic import SymbolicRegressor
 
-from config import settings as cfg
 from core.models.base import BaseModel
 
 
@@ -40,7 +39,7 @@ class SymbolicRegressionModel(BaseModel):
 
     def fit(self, X, y):
         self._sr, self._formula = fit_symbolic(
-            X, y, feature_names=list(cfg.FEATURES), seed=self._seed,
+            X, y, feature_names=self.names_for(X), seed=self._seed,
             population_size=self.population_size, generations=self.generations,
             parsimony_coefficient=self.parsimony_coefficient)
         return self
@@ -49,6 +48,9 @@ class SymbolicRegressionModel(BaseModel):
         return self._sr.predict(X)
 
     def formula(self, feature_names=None):
+        if self._sr is not None and feature_names is not None:
+            self._sr._program.feature_names = list(feature_names)
+            return "Qдв = " + humanize_expression(str(self._sr._program))
         return self._formula or "модель не обучена"
 
 

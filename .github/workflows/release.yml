@@ -34,4 +34,5 @@ jobs:
       - name: Прикрепить к релизу
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ github.ref_name == 'v0.18.0' && 'ability to add datasets with new parameters + LogLinearLS, LogLinearLS TRF' || github.ref_name }}
           files: dist/beam-gui-windows-x64.exe
