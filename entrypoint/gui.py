@@ -1,5 +1,10 @@
 import sys
 from copy import deepcopy
+from pathlib import Path
+
+# Direct execution must prefer this checkout over another installed beamSP.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import QComboBox
@@ -9,7 +14,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QCheckBox, QTreeWidget, QTreeWidgetItem, QSpinBox, QDoubleSpinBox, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QTabWidget, QProgressBar, QSplitter,
-    QMessageBox,
+    QMessageBox, QFrame,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
@@ -32,9 +37,12 @@ BIO_METHOD_NAMES = {f"bio_{opt}" for opt in OPTIMIZERS}
 HELP_HTML = """
 <h3>Как пользоваться</h3>
 <ol>
-<li><b>Датасет</b> — загрузите CSV/XLSX с заголовками, выберите Feature/Target/Group,
-задайте единицы и шум. Без Group отметьте Profile key. Сохраните mapping, чтобы
-использовать его при следующем открытии файла.</li>
+<li><b>Датасет и разметка</b> — в левой вкладке загрузите CSV/XLSX с заголовками, выберите Feature/Target/Group,
+задайте единицы и шум. Без Group отметьте Profile key. Выберите сохранённую
+разметку из списка или загрузите JSON из другой папки. «Сохранить разметку как…»
+сохраняет отдельный файл с вашим названием.</li>
+<li><b>Обучение</b> — во второй левой вкладке выберите цели, методы и параметры синтеза.
+Кнопки запуска и экспорта доступны под обеими вкладками.</li>
 <li><b>Целевая величина</b> — выберите одну или несколько целей из текущей схемы.
 Для старого файла доступны СП 63.13330 и руководство 1978 г.</li>
 <li><b>Методы</b> — можно выбрать несколько сразу, просто кликая по нужным
@@ -62,6 +70,95 @@ H = s = R = 1, E = 0), затем отметьте галочкой «+ фикс
 метрик и PNG с графиками по каждой посчитанной целевой величине, а если
 среди методов были формульные — ещё и PNG со списком формул.</li>
 </ol>
+<h3>Роли колонок</h3>
+<p>Роль определяет, как программа использует колонку датасета:</p>
+<ul>
+<li><b>Feature — входной признак.</b> Величина, по которой модель предсказывает
+результат: например, высота H, толщина s или модуль упругости E.
+Входами модели становятся только включённые через Use признаки.</li>
+<li><b>Target — предсказываемая величина.</b> Известные экспериментальные значения,
+по которым модель обучается и проверяется, например Q. Можно назначить несколько
+Target, затем выбрать нужные во вкладке «Обучение». Target нельзя одновременно
+передавать на вход модели или использовать как Profile key.</li>
+<li><b>Group — идентификатор группы.</b> Например, profile_id: одинаковые значения
+объединяют строки одного профиля. При проверке LOGO программа по очереди оставляет
+целую группу для проверки и обучается на остальных. Выберите одну включённую
+колонку Group; для проверки нужны минимум две группы. Group не становится
+входным признаком.</li>
+<li><b>Metadata — справочная информация.</b> Например, шифр образца, дата или
+комментарий. Колонка сохраняется в данных, но сама по себе не участвует
+в обучении и не является целью.</li>
+<li><b>Ignore — не использовать.</b> Для лишних, устаревших или пока не назначенных
+колонок. Данные не удаляются, и роль можно изменить позже. Как и Metadata,
+такая колонка сама по себе не подаётся модели.</li>
+</ul>
+<h3>Параметры таблицы разметки</h3>
+<table border="1" cellspacing="0" cellpadding="6" width="100%">
+<tr><th>Параметр</th><th>Что означает</th></tr>
+<tr><td><b>Column</b></td><td>Исходное название колонки в CSV/XLSX.
+По нему сопоставляются данные и сохранённая разметка. В таблице название
+не редактируется.</td></tr>
+<tr><td><b>Role</b></td><td>Назначение колонки: Feature, Target, Group,
+Metadata или Ignore. Описание ролей приведено выше.</td></tr>
+<tr><td><b>Use</b></td><td>Включает колонку в назначенной роли.
+Снятая галочка исключает Feature из входов, Target из целей, Group из явной
+группировки. Галочка у Metadata или Ignore не превращает их в признаки.
+Настройка Profile key действует отдельно от Use.</td></tr>
+<tr><td><b>Unit</b></td><td>Единица измерения, например мм, МПа или кН.
+Это подпись: программа не пересчитывает значения при смене единицы.
+Если данные в метрах, ввод «мм» не умножит их на 1000.</td></tr>
+<tr><td><b>Noise ±</b></td><td>Абсолютная амплитуда случайного шума
+для синтетических копий строки. Например, при значении 0.3 к признаку
+добавляется случайное число от −0.3 до +0.3 в его единицах, а не процентах.
+Работает при включённом синтезе только для числовых Feature типа numeric.
+«Нет» или 0 оставляет значение без изменений. Для Target, Group, Metadata
+и бинарных признаков шум не задавайте.</td></tr>
+<tr><td><b>Type</b></td><td><b>numeric</b> — числовая величина;
+<b>binary</b> — двоичный признак, например is_steel со значениями 0 и 1;
+<b>categorical</b> — категория или строка, подходящая для Group или справочных
+колонок. Для Feature и Target требуется numeric или binary с числовыми данными.
+Выбор типа не кодирует произвольный текст в числа. Для распознанного материала
+создаётся is_steel: сталь → 1, композит → 0.</td></tr>
+<tr><td><b>Formula</b></td><td>Разрешает включать Feature в степенные модели:
+биоинспирированные методы bio_*, Log-Linear LS и Log-Linear LS + TRF.
+Если галочка снята, эти методы пропускают признак, а обычные модели продолжают
+его использовать при включённом Use. Для включённых в степенную модель
+признаков и целей нужны положительные значения.</td></tr>
+<tr><td><b>Profile key</b></td><td>Определяет группы по сочетанию значений
+отмеченных колонок, если нет включённой Group. Например, одинаковые H и s
+могут обозначать один профиль. Можно отметить несколько колонок, в том числе
+Metadata или Ignore; Target выбирать нельзя. Явная Group имеет приоритет.
+Эта галочка сама по себе не добавляет колонку во входы модели.</td></tr>
+<tr><td><b>Monotonic</b></td><td>Ожидаемое направление влияния Feature
+для модели PINN: <b>↑</b> — при росте признака результат должен не уменьшаться;
+<b>↓</b> — должен не увеличиваться; <b>нет</b> — направление не задано.
+PINN штрафует нарушение этого условия при обучении; это мягкое ограничение,
+а не строгая гарантия. На остальные методы параметр не влияет.</td></tr>
+</table>
+<p><b>Пример:</b> H и s — Feature, Q — Target, profile_id — Group,
+комментарий — Metadata, ненужная старая колонка — Ignore. Если profile_id нет,
+отметьте Profile key у колонок, которые действительно определяют один профиль.</p>
+<h3>Дополнительные настройки готового JSON</h3>
+<p>В загруженной разметке могут храниться настройки, для которых нет отдельного
+поля в таблице. Они сохраняются при редактировании ролей:</p>
+<ul>
+<li><b>minimum / maximum</b> — допустимые нижняя и верхняя границы значений
+включённого Feature или Target. Выход за границы вызывает ошибку проверки;
+значения автоматически не обрезаются.</li>
+<li><b>positive_only</b> — требует строго положительных значений включённого
+Feature или Target; ноль не допускается.</li>
+<li><b>display_name</b> — подпись признака в настройках фиксации степеней.
+Исходное имя колонки остаётся прежним.</li>
+<li><b>target_key</b> — ключ цели, например SP63 для колонки Qдв_СП63.
+Ключи включённых целей должны быть уникальными.</li>
+<li><b>derived_from</b> — имя исходной колонки для вычисленного признака,
+например колонки материала для is_steel. Программа проверяет, чтобы такой
+признак не раскрывал модели значения Target или Group.</li>
+</ul>
+<p>После изменений нажмите <b>«Применить роли»</b> для проверки данных.
+Чтобы сохранить вариант, задайте <b>название разметки</b> и нажмите
+<b>«Сохранить разметку как…»</b>. Высоту таблицы можно изменить перетаскиванием
+горизонтальной ручки под ней; двойной щелчок возвращает автоматическую высоту.</p>
 <h3>Метрики</h3>
 <ul>
 <li><b>Qexp/Qpred_mean</b> — среднее отношение «эксперимент / предсказание»
@@ -191,6 +288,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
 
     def _build_ui(self):
+        dataset_controls = QWidget()
+        dataset_layout = QVBoxLayout(dataset_controls)
         controls = QWidget()
         col = QVBoxLayout(controls)
 
@@ -199,7 +298,12 @@ class MainWindow(QMainWindow):
         self._dataset_panel.dataset_changed.connect(lambda ds: setattr(self, "_dataset", ds))
         self._dataset_panel.file_loaded.connect(lambda legacy: self._synth_cb.setChecked(legacy))
         self._dataset_panel.message.connect(lambda msg: self.statusBar().showMessage(msg))
-        col.addWidget(self._dataset_panel)
+        dataset_layout.addWidget(self._dataset_panel)
+
+        self._training_dataset_info = QLabel()
+        self._training_dataset_info.setTextFormat(Qt.TextFormat.PlainText)
+        self._training_dataset_info.setWordWrap(True)
+        col.addWidget(self._training_dataset_info)
 
         tgt_box = QGroupBox("Целевая величина")
         tl = QVBoxLayout(tgt_box)
@@ -295,14 +399,31 @@ class MainWindow(QMainWindow):
 
         self._run_btn = QPushButton("▶  Запустить")
         self._run_btn.clicked.connect(self._on_run)
-        col.addWidget(self._run_btn)
         self._progress = QProgressBar()
-        col.addWidget(self._progress)
 
         self._export_btn = QPushButton("💾  Экспорт в results/")
         self._export_btn.setEnabled(False)
         self._export_btn.clicked.connect(self._on_export)
-        col.addWidget(self._export_btn)
+
+        self._control_tabs = QTabWidget()
+        for title, page in (("Датасет и разметка", dataset_controls), ("Обучение", controls)):
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(page)
+            self._control_tabs.addTab(scroll, title)
+
+        sidebar = QWidget()
+        sidebar.setMinimumWidth(330)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.addWidget(self._control_tabs, 1)
+        actions = QWidget()
+        actions_layout = QVBoxLayout(actions)
+        actions_layout.addWidget(self._run_btn)
+        actions_layout.addWidget(self._progress)
+        actions_layout.addWidget(self._export_btn)
+        sidebar_layout.addWidget(actions)
 
         self._results = QTabWidget()
         placeholder = QLabel("Выберите методы и цели, затем «Запустить».")
@@ -311,13 +432,11 @@ class MainWindow(QMainWindow):
         self._results.addTab(self._build_help_tab(), "Помощь")
 
         splitter = QSplitter()
-        control_scroll = QScrollArea()
-        control_scroll.setWidgetResizable(True)
-        control_scroll.setWidget(controls)
-        splitter.addWidget(control_scroll)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(sidebar)
         splitter.addWidget(self._results)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([330, 890])
+        splitter.setSizes([430, 790])
         self.setCentralWidget(splitter)
         self.statusBar().showMessage("Готов")
         self._refresh_dataset_controls(self._dataset.schema)
@@ -327,6 +446,12 @@ class MainWindow(QMainWindow):
                 if cb.isChecked()}
 
     def _refresh_dataset_controls(self, schema):
+        source = self._dataset.source
+        summary = source.name if source else "Текущий датасет"
+        if schema.name:
+            summary += f" · {schema.name}"
+        self._training_dataset_info.setText(
+            f"{summary}\nПризнаков: {len(schema.features)} · целей: {len(schema.targets)}")
         selected = {k: cb.isChecked() for k, cb in self._target_boxes.items()}
         while self._target_layout.count():
             old = self._target_layout.takeAt(0).widget()
@@ -452,13 +577,16 @@ class MainWindow(QMainWindow):
 
     def _on_run(self):
         if not self._dataset_panel.apply_roles():
+            self._control_tabs.setCurrentIndex(0)
             return
         methods = self._selected_methods()
         targets = self._selected_targets()
         if not methods:
+            self._control_tabs.setCurrentIndex(1)
             self.statusBar().showMessage("Выберите хотя бы один метод")
             return
         if not targets:
+            self._control_tabs.setCurrentIndex(1)
             self.statusBar().showMessage("Выберите хотя бы одну цель")
             return
 

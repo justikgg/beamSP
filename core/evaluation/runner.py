@@ -67,6 +67,7 @@ def selected_schema(df, base, feature_cols=None, targets=None):
     schema.columns = [replace(specs[c.name], role=c.role, enabled=True, target_key=c.target_key)
                       if c.name in specs else c for c in schema.columns]
     schema.legacy = base.legacy
+    schema.name = base.name
     return schema
 
 

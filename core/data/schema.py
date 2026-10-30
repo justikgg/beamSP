@@ -3,6 +3,8 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 import json
 from pathlib import Path
+from copy import deepcopy
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 import pandas as pd
@@ -56,6 +58,7 @@ class DatasetSchema:
     columns: list[ColumnSpec] = field(default_factory=list)
     grouping_columns: list[str] = field(default_factory=list)
     legacy: bool = False
+    name: str = ""
 
     @property
     def features(self) -> list[str]:
@@ -80,15 +83,78 @@ class DatasetSchema:
         return next(c for c in self.columns if c.name == name)
 
     def to_dict(self) -> dict:
-        return {"version": 1, "columns": [asdict(c) for c in self.columns],
+        data = {"version": 1, "columns": [asdict(c) for c in self.columns],
                 "grouping_columns": list(self.grouping_columns), "legacy": self.legacy}
+        if self.name:
+            data["name"] = self.name
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "DatasetSchema":
+        if not isinstance(data, dict) or not isinstance(data.get("columns"), list):
+            raise DatasetError("Разметка должна содержать список columns.")
         if data.get("version", 1) != 1:
             raise DatasetError("Неподдерживаемая версия схемы датасета.")
-        return cls([ColumnSpec(**c) for c in data["columns"]],
-                   list(data.get("grouping_columns", [])), bool(data.get("legacy", False)))
+        if not isinstance(data.get("name", ""), str):
+            raise DatasetError("Название разметки должно быть строкой.")
+        columns = [ColumnSpec(**c) for c in data["columns"]]
+        validate_headers([c.name for c in columns])
+        for spec in columns:
+            for key in ("enabled", "formula_allowed", "positive_only"):
+                if not isinstance(getattr(spec, key), bool):
+                    raise DatasetError(f"Колонка {spec.name}: {key} должен быть true или false.")
+            for key in ("unit", "dtype"):
+                if not isinstance(getattr(spec, key), str):
+                    raise DatasetError(f"Колонка {spec.name}: {key} должен быть строкой.")
+            for key in ("display_name", "target_key", "derived_from"):
+                value = getattr(spec, key)
+                if value is not None and not isinstance(value, str):
+                    raise DatasetError(f"Колонка {spec.name}: {key} должен быть строкой.")
+            for key in ("minimum", "maximum", "synthetic_noise"):
+                value = getattr(spec, key)
+                if value is not None and (isinstance(value, bool) or
+                        not isinstance(value, (int, float)) or not np.isfinite(value)):
+                    raise DatasetError(f"Колонка {spec.name}: {key} должен быть конечным числом.")
+            if spec.monotonic not in (-1, 0, 1):
+                raise DatasetError(f"Колонка {spec.name}: monotonic должен быть -1, 0 или 1.")
+            if spec.dtype not in ("numeric", "binary", "categorical"):
+                raise DatasetError(f"Колонка {spec.name}: неизвестный тип {spec.dtype}.")
+            if spec.synthetic_noise is not None and spec.synthetic_noise < 0:
+                raise DatasetError(f"Шум колонки {spec.name} должен быть неотрицательным.")
+        grouping = data.get("grouping_columns", [])
+        if not isinstance(grouping, list) or any(not isinstance(n, str) for n in grouping):
+            raise DatasetError("grouping_columns должен быть списком названий колонок.")
+        return cls(columns, grouping, bool(data.get("legacy", False)), data.get("name", ""))
+
+    def remap(self, columns, column_mapping=None) -> "DatasetSchema":
+        """Copy roles to explicitly matched columns; leave new columns ignored."""
+        columns = list(columns)
+        validate_headers(columns)
+        mapping = {c.name: c.name for c in self.columns}
+        mapping.update(column_mapping or {})
+        selected = [mapping[c.name] for c in self.columns if mapping[c.name] is not None]
+        validate_headers(selected)
+        missing = set(selected) - set(columns)
+        if missing:
+            raise DatasetError(f"Сопоставьте отсутствующие колонки: {', '.join(sorted(missing))}.")
+        result = deepcopy(self)
+        result.columns = []
+        for original in self.columns:
+            name = mapping[original.name]
+            if name is None:
+                continue
+            spec = deepcopy(original)
+            spec.name = name
+            if spec.derived_from is not None:
+                spec.derived_from = mapping.get(spec.derived_from, spec.derived_from)
+                if spec.derived_from is None:
+                    raise DatasetError(f"Для {name} сопоставьте источник {original.derived_from} "
+                                       "или пропустите производную колонку.")
+            result.columns.append(spec)
+        result.columns.extend(ColumnSpec(n) for n in columns if n not in selected)
+        result.grouping_columns = [mapping.get(n, n) for n in self.grouping_columns
+                                   if mapping.get(n, n) is not None]
+        return result
 
     @classmethod
     def from_mapping(cls, columns, features, targets, group_column=None,
@@ -241,12 +307,22 @@ def save_schema(schema: DatasetSchema, path) -> Path:
     path = Path(path)
     if path.suffix.lower() != ".json":
         path = mapping_path(path)
-    path.write_text(json.dumps(schema.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = json.dumps(schema.to_dict(), ensure_ascii=False, indent=2)
+    temporary = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                prefix=".beamsp-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return path
 
 
 def read_schema(path) -> DatasetSchema:
     try:
         return DatasetSchema.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
-    except (ValueError, TypeError, KeyError) as exc:
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise DatasetError(f"Некорректный mapping {path}: {exc}") from exc

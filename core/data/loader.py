@@ -33,7 +33,7 @@ def infer_schema(df: pd.DataFrame) -> DatasetSchema:
 
 
 def load_dataset_bundle(path, schema: DatasetSchema | None = None,
-                        validate: bool = True) -> Dataset:
+                        validate: bool = True, *, use_sidecar: bool = True) -> Dataset:
     """Load a common Dataset; sidecar mappings override inferred roles."""
     path = Path(path)
     legacy = False
@@ -64,7 +64,7 @@ def load_dataset_bundle(path, schema: DatasetSchema | None = None,
     if df.empty:
         raise DatasetError("Датасет пуст.")
     sidecar = mapping_path(path)
-    configured = deepcopy(schema or (read_schema(sidecar) if sidecar.exists() else None))
+    configured = deepcopy(schema or (read_schema(sidecar) if use_sidecar and sidecar.exists() else None))
     material_source = None
     if not legacy:
         df, material_source = add_material_feature(df, configured)
