@@ -1,9 +1,9 @@
 """Runtime column roles, validation and portable dataset mappings."""
+import json
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-import json
 from pathlib import Path
-from copy import deepcopy
 from tempfile import NamedTemporaryFile
 
 import numpy as np
@@ -184,6 +184,7 @@ class Dataset:
     frame: pd.DataFrame
     schema: DatasetSchema
     source: Path | None = None
+    export_context: dict | None = None
 
     def validate(self, require_logo: bool = True) -> "Dataset":
         self.frame = validate_dataset(self.frame, self.schema, require_logo)

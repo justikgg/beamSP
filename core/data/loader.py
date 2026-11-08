@@ -1,11 +1,23 @@
 """Header-based CSV/XLSX loading with an isolated legacy workbook adapter."""
-from pathlib import Path
 from copy import deepcopy
+from io import BytesIO
+from pathlib import Path
+
 import pandas as pd
+
 from .legacy import is_legacy_workbook, legacy_schema, parse_legacy
 from .material import add_material_feature, is_material_column, steel_feature_spec
-from .schema import (ColumnRole, ColumnSpec, Dataset, DatasetError, DatasetSchema,
-                     group_ids, mapping_path, read_schema, validate_headers)
+from .schema import (
+    ColumnRole,
+    ColumnSpec,
+    Dataset,
+    DatasetError,
+    DatasetSchema,
+    group_ids,
+    mapping_path,
+    read_schema,
+    validate_headers,
+)
 
 
 def infer_schema(df: pd.DataFrame) -> DatasetSchema:
@@ -21,9 +33,7 @@ def infer_schema(df: pd.DataFrame) -> DatasetSchema:
             role = ColumnRole.GROUP
         elif lower.startswith(("target", "q_", "qдв_")):
             role = ColumnRole.TARGET
-        elif is_material_column(name):
-            role = ColumnRole.METADATA
-        elif lower in ("id", "shifr", "шифр", "is_synth") or lower.endswith("_id"):
+        elif is_material_column(name) or lower in ("id", "shifr", "шифр", "is_synth") or lower.endswith("_id"):
             role = ColumnRole.METADATA
         elif pd.api.types.is_numeric_dtype(df[name]):
             role = ColumnRole.FEATURE
@@ -37,9 +47,11 @@ def load_dataset_bundle(path, schema: DatasetSchema | None = None,
     """Load a common Dataset; sidecar mappings override inferred roles."""
     path = Path(path)
     legacy = False
+    context = None
     try:
         if path.suffix.lower() == ".xlsx":
-            raw = pd.read_excel(path, header=None)
+            workbook_bytes = path.read_bytes()
+            raw = pd.read_excel(BytesIO(workbook_bytes), header=None)
             if is_legacy_workbook(raw):
                 df, inferred = parse_legacy(raw), legacy_schema()
                 legacy = True
@@ -47,7 +59,15 @@ def load_dataset_bundle(path, schema: DatasetSchema | None = None,
                 if raw.empty:
                     raise DatasetError("Датасет пуст.")
                 validate_headers(raw.iloc[0].tolist())
-                df = pd.read_excel(path)
+                df = pd.read_excel(BytesIO(workbook_bytes))
+            from openpyxl import load_workbook
+            workbook = load_workbook(BytesIO(workbook_bytes))
+            rows = ([i + 1 for i in range(len(raw))
+                     if raw.iat[i, 3] in ("композитный", "стальной")]
+                    if legacy else list(range(2, len(df) + 2)))
+            context = {"workbook": workbook_bytes, "sheet": workbook.sheetnames[0],
+                       "rows": rows, "header_row": 4 if legacy else 1}
+            workbook.close()
         elif path.suffix.lower() == ".csv":
             header = pd.read_csv(path, header=None, nrows=1, encoding="utf-8-sig")
             validate_headers(header.iloc[0].tolist())
@@ -63,6 +83,7 @@ def load_dataset_bundle(path, schema: DatasetSchema | None = None,
     validate_headers(df.columns)
     if df.empty:
         raise DatasetError("Датасет пуст.")
+    original_frame = df.copy()
     sidecar = mapping_path(path)
     configured = deepcopy(schema or (read_schema(sidecar) if use_sidecar and sidecar.exists() else None))
     material_source = None
@@ -81,7 +102,9 @@ def load_dataset_bundle(path, schema: DatasetSchema | None = None,
     if material_source is not None:
         resolved.spec("is_steel").derived_from = material_source
     df.attrs.update(beamsp_schema=resolved.to_dict(), beamsp_source=str(path.resolve()))
-    dataset = Dataset(df, resolved, path.resolve())
+    if context is None:
+        context = {"frame": original_frame, "rows": list(range(2, len(df) + 2)), "header_row": 1}
+    dataset = Dataset(df, resolved, path.resolve(), context)
     if validate:
         dataset.validate()
     return dataset

@@ -6,31 +6,47 @@ from pathlib import Path
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtWidgets import QComboBox
 import matplotlib.pyplot as plt
-from PyQt6.QtWidgets import QScrollArea
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
-    QCheckBox, QTreeWidget, QTreeWidgetItem, QSpinBox, QDoubleSpinBox, QPushButton, QLabel,
-    QTableWidget, QTableWidgetItem, QTabWidget, QProgressBar, QSplitter,
-    QMessageBox, QFrame,
-)
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from config import settings as cfg
 from core import reporting
+from core.data.loader import load_dataset_bundle
+from core.data.schema import Dataset
 from core.evaluation.runner import run
 from core.formula.power_law import PowerLawForm
 from core.labels import GROUP_LABELS, GROUP_ORDER, method_label, target_label
-from core.models.registry import available_models, model_class
 from core.models.bioinspired.formula_search import FormulaSearchModel
 from core.models.bioinspired.optimizers import OPTIMIZERS
-from core.data.loader import load_dataset_bundle
-from core.data.schema import Dataset
+from core.models.registry import available_models, model_class
 from entrypoint.dataset_panel import DatasetPanel
-
-
+from entrypoint.method_parameters import MethodParameters
 
 BIO_METHOD_NAMES = {f"bio_{opt}" for opt in OPTIMIZERS}
 
@@ -57,6 +73,9 @@ H = s = R = 1, E = 0), затем отметьте галочкой «+ фикс
 которых хотите дополнительно прогнать зафиксированную версию — обычная
 (свободная) версия остаётся в прогоне, обе строки можно сравнить в
 результатах.</li>
+<li><b>Параметры методов</b> — раскройте раздел, выберите метод и измените настройки.
+Размеры слоёв задаются через запятую, Seed общий для запуска. Сброс восстанавливает
+настройки выбранного метода; значения сохраняются в пределах сеанса.</li>
 <li><b>Синтез образцов</b> — добавляет к исходным строкам искусственные
 образцы с небольшим случайным разбросом входов (Q<sub>дв</sub> при этом не
 пересчитывается) для устойчивости моделей, чувствительных к размеру выборки.
@@ -65,8 +84,10 @@ H = s = R = 1, E = 0), затем отметьте галочкой «+ фикс
 профилях, проверка на отложенном). Результат: таблица «метод × метрики»,
 графики предсказание/RMSE и разбивка по профилям, а для методов, выводящих
 явную формулу — отдельная вкладка «Формулы».</li>
-<li><b>Экспорт в results/</b> — становится активной после первого прогона.
-Сохраняет сведения о данных в JSON, а результаты рядом с программой (в папку <code>results/</code>) CSV с таблицей
+<li><b>Экспорт…</b> — становится активной после первого прогона.
+Перед экспортом выберите «Сохранить всё» или «Сохранить только Excel»,
+затем папку для сохранения. Полный экспорт включает Excel с исходными данными и предсказаниями LOGO,
+сведения о данных в JSON, CSV с таблицей
 метрик и PNG с графиками по каждой посчитанной целевой величине, а если
 среди методов были формульные — ещё и PNG со списком формул.</li>
 </ol>
@@ -256,24 +277,28 @@ class RunWorker(QThread):
     finished_ok = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, model_names, targets, synth_cfg, dataset, factories=None):
+    def __init__(self, model_names, targets, synth_cfg, dataset, factories=None, parameters=None, seed=cfg.SEED, fixed=None):
         super().__init__()
         self._model_names = model_names
         self._targets = targets
         self._synth_cfg = synth_cfg
         self._dataset = dataset
         self._factories = factories
+        self._parameters = deepcopy(parameters)
+        self._seed = seed
+        self._fixed = deepcopy(fixed)
 
     def run(self):
         try:
             result = run(
                 model_names=self._model_names, dataset=self._dataset,
                 targets=self._targets, model_factories=self._factories,
-                synth_cfg=self._synth_cfg, seed=cfg.SEED,
+                synth_cfg=self._synth_cfg, seed=self._seed,
+                model_parameters=self._parameters, fixed_exponents=self._fixed,
                 progress=lambda d, t, label: self.progress.emit(d, t, label),
             )
             self.finished_ok.emit(result)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - report worker failures to the GUI
             self.failed.emit(str(exc))
 
 
@@ -284,6 +309,7 @@ class MainWindow(QMainWindow):
         self.resize(1220, 760)
         self._worker = None
         self._last_result = None
+        self._export_dir = cfg.RESULTS_DIR
         self._dataset = load_dataset_bundle(cfg.DATA_PATH)
         self._build_ui()
 
@@ -353,9 +379,22 @@ class MainWindow(QMainWindow):
         ml.addWidget(self._method_tree)
         col.addWidget(m_box, stretch=1)
 
-        self._fix_section = CollapsibleSection("Фиксация показателей степени (для bio_*)")
+        parameter_section = CollapsibleSection("Параметры методов")
+        self._parameter_section = parameter_section
+        self._parameters = MethodParameters(available_models())
+        parameter_section.layout_body().addWidget(self._parameters)
+        seed_row = QHBoxLayout()
+        seed_row.addWidget(QLabel("Seed запуска:"))
+        self._seed_spin = QSpinBox()
+        self._seed_spin.setRange(0, 2147483647)
+        self._seed_spin.setValue(cfg.SEED)
+        seed_row.addWidget(self._seed_spin)
+        parameter_section.layout_body().addLayout(seed_row)
+        col.addWidget(parameter_section)
+
+        self._fix_section = CollapsibleSection("Фиксация показателей степени (bio, LS, TRF)")
         note = QLabel("Значения ниже применяются только к тем bio_*-методам, что отмечены "
-                       "галочкой «+ фикс.» — обычная (свободная) версия при этом остаётся "
+                       "галочкой «+ фикс.», а также к выбранным LS/TRF. Обычная (свободная) версия при этом остаётся "
                        "в прогоне, обе строки можно сравнить в результатах.")
         note.setWordWrap(True)
         self._fix_section.layout_body().addWidget(note)
@@ -401,7 +440,11 @@ class MainWindow(QMainWindow):
         self._run_btn.clicked.connect(self._on_run)
         self._progress = QProgressBar()
 
-        self._export_btn = QPushButton("💾  Экспорт в results/")
+        self._export_mode = QComboBox()
+        self._export_mode.addItem("Сохранить всё (Excel, CSV, PNG, JSON)", False)
+        self._export_mode.addItem("Сохранить только Excel", True)
+        self._export_mode.setToolTip("Выберите состав файлов для экспорта")
+        self._export_btn = QPushButton("💾  Экспорт…")
         self._export_btn.setEnabled(False)
         self._export_btn.clicked.connect(self._on_export)
 
@@ -422,6 +465,7 @@ class MainWindow(QMainWindow):
         actions_layout = QVBoxLayout(actions)
         actions_layout.addWidget(self._run_btn)
         actions_layout.addWidget(self._progress)
+        actions_layout.addWidget(self._export_mode)
         actions_layout.addWidget(self._export_btn)
         sidebar_layout.addWidget(actions)
 
@@ -512,7 +556,8 @@ class MainWindow(QMainWindow):
 
     def _update_fix_box_visibility(self, *_args):
         selected_bio = [n for n in self._selected_methods() if n in BIO_METHOD_NAMES]
-        self._fix_section.setVisible(bool(selected_bio))
+        self._fix_section.setVisible(bool(selected_bio) or any(
+            n in self._selected_methods() for n in ("log_linear_ls", "log_linear_trf")))
         self._rebuild_fix_twin_rows(selected_bio)
 
     def _rebuild_fix_twin_rows(self, selected_bio):
@@ -590,7 +635,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Выберите хотя бы одну цель")
             return
 
-        methods, factories = self._apply_fixation(methods, self._fixed_exponents())
+        try:
+            parameters = self._parameters.snapshot(methods)
+        except ValueError as exc:
+            self._control_tabs.setCurrentIndex(1)
+            self._parameter_section.set_open(True)
+            QMessageBox.warning(self, "Ошибка параметров", str(exc))
+            return
+        fixed = self._fixed_exponents()
+        methods, factories = self._apply_fixation(methods, fixed)
 
         synth_cfg = dict(cfg.SYNTH)
         synth_cfg["noise"] = self._dataset.schema.noise
@@ -601,8 +654,10 @@ class MainWindow(QMainWindow):
         self._progress.setRange(0, 0)
         self.statusBar().showMessage("Запуск…")
 
-        snapshot = Dataset(self._dataset.frame.copy(), deepcopy(self._dataset.schema), self._dataset.source)
-        self._worker = RunWorker(methods, targets, synth_cfg, snapshot, factories)
+        snapshot = Dataset(self._dataset.frame.copy(), deepcopy(self._dataset.schema), self._dataset.source,
+                           deepcopy(self._dataset.export_context))
+        self._worker = RunWorker(methods, targets, synth_cfg, snapshot, factories,
+                                 parameters, self._seed_spin.value(), fixed)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
@@ -632,12 +687,22 @@ class MainWindow(QMainWindow):
     def _on_export(self):
         if self._last_result is None:
             return
+        directory = QFileDialog.getExistingDirectory(
+            self, "Выберите папку для экспорта", str(self._export_dir),
+        )
+        if not directory:
+            return
+        out_dir = Path(directory)
         try:
-            saved = reporting.export_results(self._last_result, cfg.RESULTS_DIR)
+            if self._export_mode.currentData():
+                saved = reporting.export_results(self._last_result, out_dir, excel_only=True)
+            else:
+                saved = reporting.export_results(self._last_result, out_dir)
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Ошибка экспорта", str(exc))
             return
-        self.statusBar().showMessage(f"Сохранено в {cfg.RESULTS_DIR}: {len(saved)} файлов")
+        self._export_dir = out_dir
+        self.statusBar().showMessage(f"Сохранено в {out_dir}: {len(saved)} файлов")
 
     def _show_results(self, result):
         self._results.clear()

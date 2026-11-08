@@ -19,5 +19,8 @@ dependencies = [
     "torch",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
 [tool.setuptools.packages.find]
 include = ["config*", "core*", "entrypoint*"]

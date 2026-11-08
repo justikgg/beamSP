@@ -8,3 +8,4 @@ class RunResult:
     formulas: dict = field(default_factory=dict)
     fold_rmse: dict = field(default_factory=dict)
     metadata: dict = field(default_factory=dict)
+    export_context: dict | None = None

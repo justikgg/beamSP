@@ -1,18 +1,40 @@
 """Dataset mapping editor; loading and validation are delegated to core.data."""
+import re
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-import re
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (QGroupBox, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-                             QTableWidget, QTableWidgetItem, QComboBox, QCheckBox,
-                             QDoubleSpinBox, QFileDialog, QMessageBox, QLineEdit,
-                             QDialog, QDialogButtonBox, QFrame)
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+)
 
 from core.data.loader import load_dataset_bundle
-from core.data.schema import (ColumnRole, Dataset, DatasetError, DatasetSchema,
-                              group_ids, mapping_path, read_schema, save_schema)
+from core.data.schema import (
+    ColumnRole,
+    Dataset,
+    DatasetError,
+    DatasetSchema,
+    group_ids,
+    mapping_path,
+    read_schema,
+    save_schema,
+)
 
 
 class TableHeightHandle(QFrame):
@@ -247,7 +269,7 @@ class DatasetPanel(QGroupBox):
         schema.legacy = dataset.schema.legacy
         frame = dataset.frame.copy()
         frame.attrs["beamsp_schema"] = schema.to_dict()
-        return Dataset(frame, schema, dataset.source)
+        return Dataset(frame, schema, dataset.source, dataset.export_context)
 
     def _select_mapping(self, _index):
         self.load_mapping(self._mapping_combo.currentData())
@@ -367,7 +389,7 @@ class DatasetPanel(QGroupBox):
     def apply_roles(self):
         try:
             schema = self.schema_from_ui()
-            checked = Dataset(self.dataset.frame, schema, self.dataset.source).validate()
+            checked = Dataset(self.dataset.frame, schema, self.dataset.source, self.dataset.export_context).validate()
         except DatasetError as exc:
             self._dataset_info.setText(str(exc))
             self.message.emit(str(exc))

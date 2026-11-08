@@ -1,10 +1,12 @@
-from datetime import datetime
 import json
-from pathlib import Path
 import re
+from datetime import datetime
+from pathlib import Path
+
 import numpy as np
+
 from core.formula.latexify import to_mathtext
-from core.labels import method_label, target_label, Q_UNIT
+from core.labels import method_label, target_label
 
 
 def _pyplot():
@@ -125,12 +127,26 @@ def build_fold_rmse_figure(result, tkey):
     return fig
 
 
-def export_results(result, out_dir, stamp=None):
-    plt = _pyplot()
+def export_results(result, out_dir, stamp=None, *, excel_only: bool = False):
+    """Save the complete report or only its Excel workbook."""
+    if excel_only and result.export_context is None:
+        raise ValueError("Результат не содержит исходных данных для Excel")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     saved = []
+    if result.export_context is not None:
+        from core.excel_export import export_workbook
+        workbook_path = out_dir / f"results_{stamp}.xlsx"
+        suffix = 1
+        while workbook_path.exists():
+            workbook_path = out_dir / f"results_{stamp}_{suffix}.xlsx"
+            suffix += 1
+        export_workbook(result, workbook_path)
+        saved.append(workbook_path.name)
+    if excel_only:
+        return saved
+    plt = _pyplot()
     metadata_path = out_dir / f"metadata_{stamp}.json"
     metadata_path.write_text(json.dumps({**result.metadata, "formulas": result.formulas},
                                         ensure_ascii=False, indent=2), encoding="utf-8")

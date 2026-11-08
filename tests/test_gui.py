@@ -46,6 +46,56 @@ class GuiTests(unittest.TestCase):
         with patch('entrypoint.dataset_panel.QFileDialog.getOpenFileName',return_value=(str(self.path),'csv')):
             self.window._dataset_panel.load_dataset()
 
+    def test_export_to_selected_directory_and_remember_it(self):
+        w = self.window
+        w._last_result = object()
+        chosen = Path(self.tmp.name) / 'chosen'
+        with patch('entrypoint.gui.QFileDialog.getExistingDirectory',
+                   return_value=str(chosen)) as dialog, patch(
+                       'entrypoint.gui.reporting.export_results',
+                       return_value=['result.xlsx']) as export:
+            w._on_export()
+            export.assert_called_once_with(w._last_result, chosen)
+            self.assertIn(str(chosen), w.statusBar().currentMessage())
+            w._on_export()
+            self.assertEqual(dialog.call_args.args[2], str(chosen))
+
+    def test_export_excel_only_to_selected_directory(self):
+        w = self.window
+        w._last_result = object()
+        w._export_mode.setCurrentIndex(w._export_mode.findData(True))
+        with patch('entrypoint.gui.QFileDialog.getExistingDirectory',
+                   return_value=self.tmp.name), patch(
+                       'entrypoint.gui.reporting.export_results',
+                       return_value=['result.xlsx']) as export:
+            w._on_export()
+            export.assert_called_once_with(
+                w._last_result, Path(self.tmp.name), excel_only=True)
+
+    def test_export_cancel_does_not_save(self):
+        w = self.window
+        w._last_result = object()
+        previous = w._export_dir
+        with patch('entrypoint.gui.QFileDialog.getExistingDirectory',
+                   return_value=''), patch(
+                       'entrypoint.gui.reporting.export_results') as export:
+            w._on_export()
+            export.assert_not_called()
+        self.assertEqual(w._export_dir, previous)
+
+    def test_export_permission_error_is_shown(self):
+        w = self.window
+        w._last_result = object()
+        previous = w._export_dir
+        with patch('entrypoint.gui.QFileDialog.getExistingDirectory',
+                   return_value=self.tmp.name), patch(
+                       'entrypoint.gui.reporting.export_results',
+                       side_effect=PermissionError('Нет доступа')), patch(
+                           'entrypoint.gui.QMessageBox.warning') as warning:
+            w._on_export()
+            warning.assert_called_once_with(w, 'Ошибка экспорта', 'Нет доступа')
+        self.assertEqual(w._export_dir, previous)
+
     def test_load_roles_targets_units_noise_and_worker_run(self):
         self.load()
         w=self.window

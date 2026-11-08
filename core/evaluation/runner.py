@@ -1,22 +1,36 @@
 """Runtime dataset/schema -> fold-local models -> metrics and provenance."""
-from dataclasses import replace
-from datetime import datetime, timezone
-from importlib.metadata import version, PackageNotFoundError
-from pathlib import Path
 import platform
+from copy import deepcopy
+from dataclasses import replace
+from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score
 
-from core.data.loader import load_dataset_bundle, schema_for_frame
 from core.data.legacy import legacy_profile_label
-from core.data.schema import (ColumnRole, Dataset, DatasetError, DatasetSchema, group_ids,
-                              validate_dataset, validate_feature_sources)
+from core.data.loader import load_dataset_bundle, schema_for_frame
+from core.data.schema import (
+    ColumnRole,
+    Dataset,
+    DatasetError,
+    DatasetSchema,
+    group_ids,
+    validate_dataset,
+    validate_feature_sources,
+)
 from core.data.synth import synthesize
-from core.evaluation.run_result import RunResult
-from core.models.registry import get_model
-from core.evaluation.validation import leave_one_group_out
 from core.evaluation.metrics import compute_metrics
+from core.evaluation.run_result import RunResult
+from core.evaluation.validation import leave_one_group_out
+from core.models.parameters import (
+    configured_model,
+    parameter_defaults,
+    validate_parameters,
+)
+from core.models.registry import available_models, get_model
 
 
 def _overfit_metrics(model, X, y, real, logo_r2):
@@ -94,7 +108,8 @@ def prepare(df, feature_cols=None, synth_cfg=None, seed=1337, schema=None):
 
 
 def run(model_names, feature_cols=None, targets=None, data_path=None, synth_cfg=None,
-        seed=1337, progress=None, *, schema=None, dataset=None, model_factories=None):
+        seed=1337, progress=None, *, schema=None, dataset=None, model_factories=None,
+        model_parameters=None, fixed_exponents=None):
     """Evaluate registered models with arbitrary runtime features and targets.
 
     Existing positional callers are supported. GUI may pass a validated Dataset
@@ -118,9 +133,16 @@ def run(model_names, feature_cols=None, targets=None, data_path=None, synth_cfg=
     is_synth = np.asarray(df.attrs["beamsp_synthetic"], bool)
     real = ~is_synth
     result = RunResult()
+    result.export_context = deepcopy(dataset.export_context)
+    if result.export_context is None:
+        result.export_context = {"frame": dataset.frame.copy(),
+                                 "rows": list(range(2, len(dataset.frame) + 2)), "header_row": 1}
+    settings = deepcopy(model_parameters or {})
+    for name, values in settings.items():
+        settings[name] = validate_parameters(name, values)
     source = dataset.source or (Path(data_path).resolve() if data_path else None)
     result.metadata = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "environment": _environment_versions(),
         "dataset_path": str(source) if source else None,
         "dataset_name": source.name if source else None,
@@ -146,7 +168,14 @@ def run(model_names, feature_cols=None, targets=None, data_path=None, synth_cfg=
                                                "models": {}}
         for name in model_names:
             def make_model(n=name):
-                model = factories[n]() if n in factories else get_model(n)
+                base_name = n.removesuffix("_fixed")
+                if base_name in settings:
+                    fixed = (fixed_exponents if n.endswith("_fixed") or
+                             n in {"log_linear_ls", "log_linear_trf"} else None)
+                    model = configured_model(base_name, settings[base_name], fixed)
+                    model.name = n
+                else:
+                    model = factories[n]() if n in factories else get_model(n)
                 return model.set_seed(seed).configure_features(features, active)
             fold_details = []
             preds = leave_one_group_out(make_model, X, y, groups, is_synth,
@@ -156,7 +185,13 @@ def run(model_names, feature_cols=None, targets=None, data_path=None, synth_cfg=
             m["RMSE_worst"] = max(pf.values()) if pf else 0.0
             result.fold_rmse[tkey][name] = {label_map[g]: v for g, v in pf.items()}
             model = make_model()
-            result.metadata["model_config"][name] = {"class": type(model).__name__}
+            base_name = name.removesuffix("_fixed")
+            parameters = settings.get(base_name)
+            if parameters is None:
+                parameters = parameter_defaults(base_name) if base_name in available_models() else {}
+            result.metadata["model_config"][name] = {
+                "class": type(model).__name__, "parameters": parameters, "seed": seed,
+            }
             if hasattr(model, "_form"):
                 result.metadata["model_config"][name]["fixed_exponents"] = dict(model._form._fixed_exponents)
             m["R2_train"], m["overfit"] = _overfit_metrics(model, X, y, real, m["R2"])
