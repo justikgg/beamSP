@@ -3,6 +3,7 @@
 from copy import copy
 from io import BytesIO
 from pathlib import Path
+import json
 
 import numpy as np
 from openpyxl import Workbook, load_workbook
@@ -54,6 +55,19 @@ def export_workbook(result: RunResult, path: Path) -> None:
                     cell._style = copy(sheet.cell(row, column - 1)._style)
                     cell.number_format = "0.000000"
                 column += 1
+        tuning = result.metadata.get("tuning", {})
+        if tuning:
+            summary = workbook.create_sheet("Подбор параметров")
+            summary.append(["Цель", "Лучшие параметры", "Проверок", "RMSE выбора",
+                            "MAE выбора", "R² выбора", "RMSE вложенная LOGO",
+                            "MAE вложенная LOGO", "R² вложенная LOGO"])
+            for target, item in tuning.items():
+                selected = item["selection_metrics"]
+                independent = item["independent_metrics"]
+                summary.append([target, json.dumps(item["best_parameters"], ensure_ascii=False),
+                                item["combinations"], selected["RMSE"], selected["MAE"],
+                                selected["R2"], independent["RMSE"], independent["MAE"],
+                                independent["R2"]])
         # Exclusive creation prevents accidental replacement, including source files.
         with path.open("xb") as output:
             workbook.save(output)

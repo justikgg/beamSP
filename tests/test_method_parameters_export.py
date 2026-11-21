@@ -12,6 +12,7 @@ from test_pipeline import dynamic
 
 from core.data.loader import load_dataset_bundle
 from core.evaluation.runner import run
+from core.evaluation.tuning import TuningResult
 from core.excel_export import export_workbook
 from core.models.parameters import (
     configured_model,
@@ -215,3 +216,62 @@ def test_excel_only_without_source_fails_without_files(tmp_path):
     with pytest.raises(ValueError, match="исходных данных"):
         export_results(RunResult(), tmp_path, excel_only=True)
     assert not list(tmp_path.iterdir())
+
+
+def test_tuning_summary_is_preserved_in_excel_only_export(tmp_path):
+    from core.reporting import export_results
+
+    result = run(["ridge"], dataset=dynamic(), targets={"a": "target_a"},
+                 model_parameters={"ridge": {"alpha": 2}})
+    result.metadata["tuning"] = {"a": {
+        "best_parameters": {"alpha": 2}, "combinations": 2,
+        "selection_metrics": {"RMSE": 1.0, "MAE": 0.8, "R2": 0.9},
+        "independent_metrics": {"RMSE": 1.2, "MAE": 1.0, "R2": 0.8},
+    }}
+    saved = export_results(result, tmp_path, stamp="tuned", excel_only=True)
+    book = load_workbook(tmp_path / saved[0])
+    summary = book["Подбор параметров"]
+    assert summary["B2"].value == '{"alpha": 2}'
+    assert summary["C2"].value == 2
+    assert summary["G2"].value == 1.2
+    book.close()
+
+
+def test_two_target_tuning_merge_keeps_configs_predictions_formulas_and_export(tmp_path):
+    from entrypoint.gui import merge_tuned_results
+
+    ds = dynamic()
+    results = {
+        "a": run(["symreg"], dataset=ds, targets={"a": "target_a"},
+                 model_parameters={"symreg": {"population_size": 10,
+                                               "generations": 1,
+                                               "parsimony_coefficient": 0.08}}),
+        "b": run(["symreg"], dataset=ds, targets={"b": "target_b"},
+                 model_parameters={"symreg": {"population_size": 11,
+                                               "generations": 1,
+                                               "parsimony_coefficient": 0.08}}),
+    }
+    tuning = {
+        "a": TuningResult({"population_size": 10, "generations": 1,
+                           "parsimony_coefficient": 0.08},
+                          {"RMSE": 1, "MAE": 1, "R2": 0},
+                          {"RMSE": 1, "MAE": 1, "R2": 0}, 1, 0.1, []),
+        "b": TuningResult({"population_size": 11, "generations": 1,
+                           "parsimony_coefficient": 0.08},
+                          {"RMSE": 2, "MAE": 2, "R2": 0},
+                          {"RMSE": 2, "MAE": 2, "R2": 0}, 1, 0.1, []),
+    }
+    merged = merge_tuned_results(results, tuning)
+    assert merged.metadata["model_config"]["a"]["symreg"]["parameters"]["population_size"] == 10
+    assert merged.metadata["model_config"]["b"]["symreg"]["parameters"]["population_size"] == 11
+    assert set(merged.predictions) == {"a", "b"}
+    assert set(merged.formulas) == {"a", "b"}
+    assert all(merged.formulas[key]["symreg"] for key in ("a", "b"))
+    output = tmp_path / "merged.xlsx"
+    export_workbook(merged, output)
+    sheet = load_workbook(output).active
+    prediction_columns = [
+        cell.value for cell in sheet[1]
+        if cell.value and "LOGO" in str(cell.value)
+    ]
+    assert len(prediction_columns) == 2

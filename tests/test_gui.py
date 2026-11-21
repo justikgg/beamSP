@@ -6,11 +6,12 @@ import tempfile
 import subprocess
 import sys
 from pathlib import Path
+from time import monotonic
 import unittest
 from unittest.mock import patch
 
 try:
-    from PyQt6.QtCore import QEventLoop, QTimer, Qt
+    from PyQt6.QtCore import QEventLoop, QPoint, QTimer, Qt
     from PyQt6.QtWidgets import QApplication, QDialog, QScrollArea
     from PyQt6.QtTest import QTest
     from entrypoint.gui import MainWindow
@@ -45,6 +46,141 @@ class GuiTests(unittest.TestCase):
     def load(self):
         with patch('entrypoint.dataset_panel.QFileDialog.getOpenFileName',return_value=(str(self.path),'csv')):
             self.window._dataset_panel.load_dataset()
+
+    def method_item(self, name):
+        tree = self.window._method_tree
+        for i in range(tree.topLevelItemCount()):
+            group = tree.topLevelItem(i)
+            for j in range(group.childCount()):
+                item = group.child(j)
+                if item.data(0, Qt.ItemDataRole.UserRole) == name:
+                    return item
+        self.fail(f'Метод {name} отсутствует в дереве')
+
+    def test_visible_checks_toggle_once_and_single_method_button(self):
+        w = self.window
+        tree = w._method_tree
+        self.assertEqual(w._selected_method_count.text(), 'Выбрано методов: 0')
+        self.assertEqual(w._selected_methods(), [])
+        linear = self.method_item('linear')
+        pso = self.method_item('bio_pso')
+        self.assertEqual(linear.checkState(0), Qt.CheckState.Unchecked)
+        self.assertEqual(pso.checkState(0), Qt.CheckState.Unchecked)
+        self.assertTrue(pso.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+        tree.expandItem(pso.parent())
+        w.show()
+        self.app.processEvents()
+        rect = tree.visualItemRect(pso)
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton,
+                         pos=QPoint(rect.left() + 8, rect.center().y()))
+        self.assertEqual(pso.checkState(0), Qt.CheckState.Checked)
+        self.assertEqual(w._selected_method_count.text(), 'Выбрано методов: 1')
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton,
+                         pos=QPoint(rect.left() + 8, rect.center().y()))
+        self.assertEqual(pso.checkState(0), Qt.CheckState.Unchecked)
+        self.assertEqual(w._selected_method_count.text(), 'Выбрано методов: 0')
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton,
+                         pos=QPoint(rect.left() + 60, rect.center().y()))
+        self.assertEqual(pso.checkState(0), Qt.CheckState.Checked)
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton,
+                         pos=QPoint(rect.left() + 60, rect.center().y()))
+        self.assertEqual(pso.checkState(0), Qt.CheckState.Unchecked)
+        tree.setCurrentItem(pso)
+        w._only_method_btn.click()
+        self.assertEqual(w._selected_methods(), ['bio_pso'])
+        self.assertEqual(linear.checkState(0), Qt.CheckState.Unchecked)
+        self.assertEqual(w._selected_method_count.text(), 'Выбрано методов: 1')
+
+    def test_tuning_lists_multiple_methods_and_ignores_single_value_of_other_method(self):
+        self.load()
+        w = self.window
+        self.method_item('linear').setCheckState(0, Qt.CheckState.Checked)
+        pso = self.method_item('bio_pso')
+        pso.setCheckState(0, Qt.CheckState.Checked)
+        w._parameters.tune_mode.setChecked(True)
+        with patch('entrypoint.gui.QMessageBox.warning') as warning:
+            w._on_run()
+        message = warning.call_args.args[2]
+        self.assertIn('Линейная регрессия', message)
+        self.assertIn('рой частиц', message)
+        w._method_tree.setCurrentItem(pso)
+        w._only_method_btn.click()
+        w._parameters._values['pinn'] = {'hidden': 'bad'}
+        editors = w._parameters._tune_editors
+        editors['n_particles'][1].setValue(3)
+        editors['n_particles'][2].setValue(3)
+        editors['iters'][1].setValue(1)
+        editors['iters'][2].setValue(2)
+        editors['iters'][3].setValue(1)
+        w._synth_cb.setChecked(False)
+        for key, cb in w._target_boxes.items():
+            cb.setChecked(key == 'target_a')
+        with patch('entrypoint.gui.QMessageBox.warning') as warning:
+            w._on_run()
+            deadline = monotonic() + 15
+            while w._run_btn.isEnabled() is False and monotonic() < deadline:
+                self.app.processEvents()
+                QTest.qWait(10)
+        self.assertFalse(warning.called, warning.call_args)
+        self.assertIsNotNone(w._last_result)
+        self.assertEqual(w._last_result.metadata['tuning']['target_a']['combinations'], 2)
+
+    def test_run_with_no_methods_shows_warning_and_does_not_start_worker(self):
+        w = self.window
+        self.assertEqual(w._selected_methods(), [])
+        self.assertEqual(w._selected_method_count.text(), 'Выбрано методов: 0')
+        with patch('entrypoint.gui.QMessageBox.warning') as warning:
+            w._on_run()
+        warning.assert_called_once_with(
+            w, 'Метод не выбран', 'Выберите хотя бы один метод')
+        self.assertIsNone(w._worker)
+        self.assertIsNone(w._tune_worker)
+
+        self.method_item('linear').setCheckState(0, Qt.CheckState.Checked)
+        self.method_item('linear').setCheckState(0, Qt.CheckState.Unchecked)
+        self.assertEqual(w._selected_methods(), [])
+        self.assertEqual(w._selected_method_count.text(), 'Выбрано методов: 0')
+
+    def test_fixed_pso_tuning_keeps_fixed_formula_in_final_result(self):
+        self.load()
+        w = self.window
+        pso = self.method_item('bio_pso')
+        w._method_tree.setCurrentItem(pso)
+        w._only_method_btn.click()
+        w._parameters.tune_mode.setChecked(True)
+        editors = w._parameters._tune_editors
+        for key, value in (('n_particles', 3), ('iters', 1)):
+            editors[key][1].setValue(value)
+            editors[key][2].setValue(value)
+        w._fix_rows['x1'][0].setChecked(True)
+        w._fix_rows['x1'][1].setValue(1)
+        w._fix_twin_checks['bio_pso'].setChecked(True)
+        w._synth_cb.setChecked(False)
+        for key, cb in w._target_boxes.items():
+            cb.setChecked(key == 'target_a')
+        with patch('entrypoint.gui.QMessageBox.warning') as warning:
+            w._on_run()
+            deadline = monotonic() + 15
+            while not w._run_btn.isEnabled() and monotonic() < deadline:
+                self.app.processEvents()
+                QTest.qWait(10)
+        self.assertFalse(warning.called, warning.call_args)
+        config = w._last_result.metadata['model_config']['target_a']['bio_pso_fixed']
+        self.assertEqual(config['fixed_exponents'], {'x1': 1.0})
+        self.assertIn('bio_pso_fixed', w._last_result.formulas['target_a'])
+
+    def test_tuning_editor_exposes_new_methods_and_explains_ls(self):
+        panel = self.window._parameters
+        for name in ('bio_pso', 'bio_cmaes', 'symreg', 'bayes_symreg', 'pinn', 'rl_ac'):
+            panel.methods.setCurrentIndex(panel.methods.findData(name))
+            panel.tune_mode.setChecked(True)
+            self.assertTrue(panel._tune_editors, name)
+            self.assertEqual(set(panel.tuning_snapshot([name])[name]),
+                             set(panel._tune_editors))
+        panel.methods.setCurrentIndex(panel.methods.findData('log_linear_ls'))
+        self.assertFalse(panel._tune_editors)
+        self.assertIn('обычное обучение',
+                      panel.tune_form.itemAt(panel.tune_form.count() - 1).widget().text())
 
     def test_export_to_selected_directory_and_remember_it(self):
         w = self.window
@@ -99,6 +235,7 @@ class GuiTests(unittest.TestCase):
     def test_load_roles_targets_units_noise_and_worker_run(self):
         self.load()
         w=self.window
+        self.method_item('linear').setCheckState(0, Qt.CheckState.Checked)
         self.assertEqual(w._dataset_panel._columns_table.rowCount(),11)
         self.assertEqual(list(w._fix_rows),[f'x{i}' for i in range(1,9)])
         self.assertEqual(set(w._target_boxes),{'target_a','target_b'})
@@ -159,6 +296,7 @@ class GuiTests(unittest.TestCase):
     def test_bad_role_mapping_is_visible_and_does_not_start_worker(self):
         self.load()
         w=self.window
+        self.method_item('linear').setCheckState(0, Qt.CheckState.Checked)
         for i,spec in enumerate(w._dataset_panel._column_specs):
             if spec.role==ColumnRole.TARGET:
                 role=w._dataset_panel._columns_table.cellWidget(i,1)
@@ -274,7 +412,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.window._dataset.schema.spec('height').synthetic_noise, 0.2)
         self.assertEqual(self.window._dataset.schema.spec('extra').role, ColumnRole.IGNORE)
         self.assertEqual(self.window._dataset.schema.name, 'Исходная разметка')
-        self.assertEqual(self.window._dataset.source, self.path)
+        self.assertEqual(self.window._dataset.source, self.path.resolve())
         self.assertEqual(external.read_bytes(), original_bytes)
         self.assertTrue(panel.apply_roles())
 
@@ -303,7 +441,7 @@ class GuiTests(unittest.TestCase):
         with patch('entrypoint.dataset_panel.QMessageBox.warning') as warning:
             self.load()
         warning.assert_called_once()
-        self.assertEqual(self.window._dataset.source, self.path)
+        self.assertEqual(self.window._dataset.source, self.path.resolve())
         self.assertIsNone(self.window._dataset_panel._mapping_path)
         self.assertTrue(self.window._dataset_panel.apply_roles())
 
@@ -343,7 +481,7 @@ class GuiTests(unittest.TestCase):
                    return_value=(str(path), 'json')) as picker:
             QTest.mouseClick(panel._load_mapping_btn, Qt.MouseButton.LeftButton)
         picker.assert_called_once()
-        self.assertEqual(panel._mapping_path, path)
+        self.assertEqual(panel._mapping_path, path.resolve())
         self.assertEqual(panel._mapping_name.text(), 'Готовая разметка')
         self.assertNotIn('x8', self.window._fix_rows)
 

@@ -109,7 +109,7 @@ def prepare(df, feature_cols=None, synth_cfg=None, seed=1337, schema=None):
 
 def run(model_names, feature_cols=None, targets=None, data_path=None, synth_cfg=None,
         seed=1337, progress=None, *, schema=None, dataset=None, model_factories=None,
-        model_parameters=None, fixed_exponents=None):
+        model_parameters=None, fixed_exponents=None, cancel=None):
     """Evaluate registered models with arbitrary runtime features and targets.
 
     Existing positional callers are supported. GUI may pass a validated Dataset
@@ -179,7 +179,7 @@ def run(model_names, feature_cols=None, targets=None, data_path=None, synth_cfg=
                 return model.set_seed(seed).configure_features(features, active)
             fold_details = []
             preds = leave_one_group_out(make_model, X, y, groups, is_synth,
-                                       fold_diagnostics=fold_details)
+                                       fold_diagnostics=fold_details, cancel=cancel)
             m = compute_metrics(y[real], preds[real])
             pf = per_fold_rmse(y, preds, groups, real)
             m["RMSE_worst"] = max(pf.values()) if pf else 0.0

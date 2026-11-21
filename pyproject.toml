@@ -17,6 +17,7 @@ dependencies = [
     "matplotlib",
     "cma",
     "torch",
+    "PyQt6",
 ]
 
 [project.optional-dependencies]
