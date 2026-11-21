@@ -2,6 +2,7 @@
 from copy import deepcopy
 from functools import partial
 import json
+from importlib.metadata import version
 import os
 from pathlib import Path
 import tempfile
@@ -63,6 +64,10 @@ class LegacyTests(unittest.TestCase):
 
     def test_deterministic_v0171_results(self):
         reference = json.loads((ROOT/'tests/fixtures/legacy_v0171.json').read_text())
+        # GBR and libsvm have version-dependent predictions. Keep the v0.17.1
+        # snapshot intact and check the installed, supported sklearn separately.
+        sklearn_reference = (json.loads((ROOT/'tests/fixtures/legacy_sklearn_1_5_2.json').read_text())
+                             if version('scikit-learn') == '1.5.2' else None)
         for enabled in (False, True):
             with self.subTest(synthesis=enabled):
                 result = run(['linear', 'ridge', 'lasso', 'elasticnet', 'gbr', 'svr'],
@@ -71,11 +76,14 @@ class LegacyTests(unittest.TestCase):
                 self.assertEqual(result.metadata['synthetic_rows'], 270 if enabled else 0)
                 for target, old in reference[str(enabled)].items():
                     for model, metrics in old['metrics'].items():
+                        expected = (sklearn_reference[str(enabled)][target] if sklearn_reference
+                                    and model in {'gbr', 'svr'} else old)
+                        metrics = expected['metrics'][model]
                         for name, value in metrics.items():
                             np.testing.assert_allclose(result.metrics[target].loc[model, name], value,
                                                        rtol=1e-9, atol=1e-9)
                         np.testing.assert_allclose(result.predictions[target][model]['y_pred'],
-                                                   old['predictions'][model], rtol=1e-9, atol=1e-9)
+                                                   expected['predictions'][model], rtol=1e-9, atol=1e-9)
 
 
 class DynamicTests(unittest.TestCase):

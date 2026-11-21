@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from core.data.schema import DatasetError
 
-def leave_one_group_out(model_factory, X, y, groups, is_synth=None, *, fold_diagnostics=None):
+def leave_one_group_out(model_factory, X, y, groups, is_synth=None, *, fold_diagnostics=None, cancel=None):
     preds = np.full(len(y), np.nan)
     if is_synth is None:
         is_synth = np.zeros(len(y), dtype=bool)
@@ -16,6 +16,8 @@ def leave_one_group_out(model_factory, X, y, groups, is_synth=None, *, fold_diag
     if len(pd.unique(groups[~is_synth])) < 2:
         raise DatasetError("Для LOGO нужны минимум две реальные группы.")
     for g in pd.unique(groups):
+        if cancel and cancel():
+            raise InterruptedError("Расчёт остановлен пользователем")
         test_mask = (groups == g) & (~is_synth)
         train_mask = groups != g
         if test_mask.sum() == 0:

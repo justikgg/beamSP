@@ -40,6 +40,7 @@ from core import reporting
 from core.data.loader import load_dataset_bundle
 from core.data.schema import Dataset
 from core.evaluation.runner import run
+from core.evaluation.tuning import TuningCancelled, tune_method
 from core.formula.power_law import PowerLawForm
 from core.labels import GROUP_LABELS, GROUP_ORDER, method_label, target_label
 from core.models.bioinspired.formula_search import FormulaSearchModel
@@ -287,6 +288,10 @@ class RunWorker(QThread):
         self._parameters = deepcopy(parameters)
         self._seed = seed
         self._fixed = deepcopy(fixed)
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
         try:
@@ -295,10 +300,119 @@ class RunWorker(QThread):
                 targets=self._targets, model_factories=self._factories,
                 synth_cfg=self._synth_cfg, seed=self._seed,
                 model_parameters=self._parameters, fixed_exponents=self._fixed,
+                cancel=lambda: self._cancelled,
                 progress=lambda d, t, label: self.progress.emit(d, t, label),
             )
             self.finished_ok.emit(result)
         except Exception as exc:  # noqa: BLE001 - report worker failures to the GUI
+            self.failed.emit(str(exc))
+
+
+class TuneWorker(QThread):
+    progress = pyqtSignal(int, int, str, float)
+    finished_ok = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, method, targets, ranges, dataset, synth_cfg, seed, limit, fixed=None):
+        super().__init__(); self.method = method; self.targets = targets; self.ranges = ranges
+        self.dataset = dataset; self.synth_cfg = synth_cfg; self.seed = seed; self.limit = limit
+        self.fixed = deepcopy(fixed); self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            found = {}
+            for key, column in self.targets.items():
+                if self._cancelled: raise TuningCancelled
+                found[key] = tune_method(self.method, self.ranges, dataset=self.dataset, target_column=column,
+                    synth_cfg=self.synth_cfg, seed=self.seed, limit=self.limit,
+                    fixed_exponents=self.fixed,
+                    progress=lambda d, t, label, elapsed: self.progress.emit(d, t, label, elapsed),
+                    cancel=lambda: self._cancelled)
+            self.finished_ok.emit(found)
+        except TuningCancelled:
+            self.failed.emit("Подбор остановлен пользователем после завершения текущего обучения")
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+def merge_tuned_results(target_results, tuning_results):
+    """Merge target runs while retaining each target's selected configuration."""
+    merged = None
+    configs = {}
+    for key, one in target_results.items():
+        configs[key] = deepcopy(one.metadata.get("model_config", {}))
+        if merged is None:
+            merged = one
+            continue
+        merged.metrics.update(one.metrics)
+        merged.predictions.update(one.predictions)
+        merged.formulas.update(one.formulas)
+        merged.fold_rmse.update(one.fold_rmse)
+        for field in ("targets", "per_target"):
+            merged.metadata.setdefault(field, {}).update(one.metadata.get(field, {}))
+        for field in ("real_rows", "synthetic_rows", "groups"):
+            merged.metadata[field] = max(merged.metadata.get(field, 0), one.metadata.get(field, 0))
+    if merged is None:
+        raise ValueError("Подбор не вернул результатов")
+    merged.metadata["model_config"] = configs
+    merged.metadata["model_config_by_target"] = deepcopy(configs)
+    merged.metadata["tuning"] = {
+        key: {"best_parameters": value.best_parameters,
+              "selection_metrics": value.selection_metrics,
+              "independent_metrics": value.independent_metrics,
+              "combinations": value.combinations,
+              "elapsed_seconds": value.elapsed_seconds,
+              "history": value.history}
+        for key, value in tuning_results.items()
+    }
+    return merged
+
+
+class FinalTuneWorker(QThread):
+    """Run selected configurations and merge each target in the worker thread."""
+    progress = pyqtSignal(int, int, str)
+    finished_ok = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, method, tuning_results, dataset, synth_cfg, seed, fixed=None):
+        super().__init__()
+        self.method = method
+        self.tuning_results = tuning_results
+        self.dataset = dataset
+        self.synth_cfg = synth_cfg
+        self.seed = seed
+        self.fixed = deepcopy(fixed)
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            target_results = {}
+            total = len(self.tuning_results)
+            for index, (key, tuning) in enumerate(self.tuning_results.items(), 1):
+                if self._cancelled:
+                    raise TuningCancelled
+                target = self.dataset.schema.targets[key]
+                fit_name = f"{self.method}_fixed" if self.fixed and self.method in BIO_METHOD_NAMES else self.method
+                one = run([fit_name], dataset=self.dataset, targets={key: target},
+                          synth_cfg=self.synth_cfg, seed=self.seed,
+                          model_parameters={self.method: tuning.best_parameters},
+                          fixed_exponents=self.fixed,
+                          cancel=lambda: self._cancelled,
+                          progress=lambda d, t, label: self.progress.emit(
+                              (index - 1) * max(t, 1) + d, max(total * max(t, 1), 1), label))
+                target_results[key] = one
+                self.progress.emit(index, total, f"Итоговое обучение: {key}")
+            merged = merge_tuned_results(target_results, self.tuning_results)
+            self.finished_ok.emit(merged)
+        except TuningCancelled:
+            self.failed.emit("Итоговое обучение остановлено пользователем")
+        except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
 
 
@@ -308,6 +422,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Вклад двутавра Qдв — ML и биоинспирированная оптимизация")
         self.resize(1220, 760)
         self._worker = None
+        self._tune_worker = None
+        self._final_tune_worker = None
         self._last_result = None
         self._export_dir = cfg.RESULTS_DIR
         self._dataset = load_dataset_bundle(cfg.DATA_PATH)
@@ -339,6 +455,12 @@ class MainWindow(QMainWindow):
 
         m_box = QGroupBox("Методы (можно несколько)")
         ml = QVBoxLayout(m_box)
+        self._selected_method_count = QLabel("Выбрано методов: 0")
+        ml.addWidget(self._selected_method_count)
+        self._only_method_btn = QPushButton("Выбрать только этот метод")
+        self._only_method_btn.setToolTip("Выберите строку метода в списке, затем нажмите эту кнопку")
+        self._only_method_btn.clicked.connect(self._select_only_current_method)
+        ml.addWidget(self._only_method_btn)
         self._method_tree = QTreeWidget()
         self._method_tree.setHeaderHidden(True)
         self._method_tree.setIndentation(14)
@@ -361,19 +483,13 @@ class MainWindow(QMainWindow):
             self._method_tree.addTopLevelItem(group_item)
             for name in names:
                 item = QTreeWidgetItem([method_label(name)])
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(0, Qt.CheckState.Unchecked)
-                
-                
-                
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 item.setData(0, Qt.ItemDataRole.UserRole, name)
                 group_item.addChild(item)
                 if first_item is None:
                     first_item = item
                     first_group_item = group_item
-        if first_item is not None:
-            first_item.setCheckState(0, Qt.CheckState.Checked)
-            first_item.setFlags(first_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
         if first_group_item is not None:
             self._method_tree.expandItem(first_group_item)
         ml.addWidget(self._method_tree)
@@ -415,9 +531,10 @@ class MainWindow(QMainWindow):
         self._fix_section.set_open(True)
         col.addWidget(self._fix_section)
 
-        self._method_tree.itemChanged.connect(self._update_fix_box_visibility)
+        self._method_tree.itemChanged.connect(self._on_method_check_changed)
+        self._method_tree.itemPressed.connect(self._on_tree_item_pressed)
         self._method_tree.itemClicked.connect(self._on_tree_item_clicked)
-        self._update_fix_box_visibility()
+        self._on_method_check_changed()
         self._refresh_fix_summary()
 
         self._synth_section = CollapsibleSection("Синтез образцов")
@@ -439,6 +556,9 @@ class MainWindow(QMainWindow):
         self._run_btn = QPushButton("▶  Запустить")
         self._run_btn.clicked.connect(self._on_run)
         self._progress = QProgressBar()
+        self._stop_btn = QPushButton("■  Остановить")
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.clicked.connect(self._stop_current)
 
         self._export_mode = QComboBox()
         self._export_mode.addItem("Сохранить всё (Excel, CSV, PNG, JSON)", False)
@@ -465,6 +585,7 @@ class MainWindow(QMainWindow):
         actions_layout = QVBoxLayout(actions)
         actions_layout.addWidget(self._run_btn)
         actions_layout.addWidget(self._progress)
+        actions_layout.addWidget(self._stop_btn)
         actions_layout.addWidget(self._export_mode)
         actions_layout.addWidget(self._export_btn)
         sidebar_layout.addWidget(actions)
@@ -545,14 +666,42 @@ class MainWindow(QMainWindow):
                     names.append(item.data(0, Qt.ItemDataRole.UserRole))
         return names
 
+    def _on_tree_item_pressed(self, item, _column):
+        self._pressed_check_state = (item, item.checkState(0))
+
     def _on_tree_item_clicked(self, item, _column):
         if item.parent() is None:
-            return  
-        state = Qt.CheckState.Unchecked if item.checkState(0) == Qt.CheckState.Checked else Qt.CheckState.Checked
-        item.setCheckState(0, state)
-        
-        
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+            return
+        pressed = getattr(self, "_pressed_check_state", None)
+        if pressed is not None and pressed[0] is item and item.checkState(0) == pressed[1]:
+            item.setCheckState(0, Qt.CheckState.Unchecked if pressed[1] == Qt.CheckState.Checked
+                               else Qt.CheckState.Checked)
+        self._pressed_check_state = None
+        self._parameters.methods.setCurrentIndex(
+            self._parameters.methods.findData(item.data(0, Qt.ItemDataRole.UserRole)))
+
+    def _select_only_current_method(self):
+        selected = self._method_tree.currentItem()
+        if selected is None or selected.parent() is None:
+            self.statusBar().showMessage("Сначала выберите строку метода")
+            return
+        root = self._method_tree.invisibleRootItem()
+        self._method_tree.blockSignals(True)
+        try:
+            for gi in range(root.childCount()):
+                group = root.child(gi)
+                for ci in range(group.childCount()):
+                    item = group.child(ci)
+                    item.setCheckState(0, Qt.CheckState.Checked if item is selected else Qt.CheckState.Unchecked)
+        finally:
+            self._method_tree.blockSignals(False)
+        self._parameters.methods.setCurrentIndex(
+            self._parameters.methods.findData(selected.data(0, Qt.ItemDataRole.UserRole)))
+        self._on_method_check_changed()
+
+    def _on_method_check_changed(self, *_args):
+        self._selected_method_count.setText(f"Выбрано методов: {len(self._selected_methods())}")
+        self._update_fix_box_visibility()
 
     def _update_fix_box_visibility(self, *_args):
         selected_bio = [n for n in self._selected_methods() if n in BIO_METHOD_NAMES]
@@ -621,28 +770,43 @@ class MainWindow(QMainWindow):
         return methods + extra, factories
 
     def _on_run(self):
-        if not self._dataset_panel.apply_roles():
-            self._control_tabs.setCurrentIndex(0)
-            return
         methods = self._selected_methods()
-        targets = self._selected_targets()
         if not methods:
             self._control_tabs.setCurrentIndex(1)
             self.statusBar().showMessage("Выберите хотя бы один метод")
+            QMessageBox.warning(self, "Метод не выбран", "Выберите хотя бы один метод")
             return
+        if not self._dataset_panel.apply_roles():
+            self._control_tabs.setCurrentIndex(0)
+            return
+        targets = self._selected_targets()
         if not targets:
             self._control_tabs.setCurrentIndex(1)
             self.statusBar().showMessage("Выберите хотя бы одну цель")
             return
 
         try:
-            parameters = self._parameters.snapshot(methods)
+            if self._parameters.tune_mode.isChecked():
+                if len(methods) != 1:
+                    selected = ", ".join(method_label(name) for name in methods)
+                    raise ValueError(f"Для подбора выберите один метод. Сейчас выбраны: {selected}")
+                method_index = self._parameters.methods.findData(methods[0])
+                if self._parameters.methods.currentIndex() != method_index:
+                    self._parameters.methods.setCurrentIndex(method_index)
+                tuning = self._parameters.tuning_snapshot(methods)
+                parameters = {}
+            else:
+                parameters = self._parameters.snapshot(methods)
+                tuning = {}
         except ValueError as exc:
             self._control_tabs.setCurrentIndex(1)
             self._parameter_section.set_open(True)
             QMessageBox.warning(self, "Ошибка параметров", str(exc))
             return
         fixed = self._fixed_exponents()
+        tune_fixed = (fixed if tuning and methods[0] in BIO_METHOD_NAMES
+                      and self._fix_twin_checks.get(methods[0]) is not None
+                      and self._fix_twin_checks[methods[0]].isChecked() else None)
         methods, factories = self._apply_fixation(methods, fixed)
 
         synth_cfg = dict(cfg.SYNTH)
@@ -650,7 +814,20 @@ class MainWindow(QMainWindow):
         synth_cfg["enabled"] = self._synth_cb.isChecked()
         synth_cfg["samples_per_profile"] = self._samples_spin.value()
 
-        self._run_btn.setEnabled(False)
+        self._run_btn.setEnabled(False); self._stop_btn.setEnabled(True)
+        if tuning:
+            method = next(iter(tuning))
+            count = 1
+            for values in tuning[method].values(): count *= len(values)
+            if count > self._parameters.tune_limit.value():
+                QMessageBox.warning(self, "Слишком много комбинаций", f"Диапазон содержит {count}, лимит — {self._parameters.tune_limit.value()}.")
+                self._run_btn.setEnabled(True); self._stop_btn.setEnabled(False); return
+            self._progress.setRange(0, count); self._progress.setValue(0)
+            self.statusBar().showMessage(f"Подбор: проверок до старта — {count}")
+            snapshot = Dataset(self._dataset.frame.copy(), deepcopy(self._dataset.schema), self._dataset.source, deepcopy(self._dataset.export_context))
+            self._tune_worker = TuneWorker(method, targets, tuning[method], snapshot, synth_cfg,
+                                           self._seed_spin.value(), self._parameters.tune_limit.value(), fixed=tune_fixed)
+            self._tune_worker.progress.connect(self._on_tune_progress); self._tune_worker.finished_ok.connect(self._on_tune_done); self._tune_worker.failed.connect(self._on_failed); self._tune_worker.finished.connect(self._on_tune_thread_finished); self._tune_worker.start(); return
         self._progress.setRange(0, 0)
         self.statusBar().showMessage("Запуск…")
 
@@ -668,8 +845,57 @@ class MainWindow(QMainWindow):
         self._progress.setValue(done)
         self.statusBar().showMessage(f"[{done}/{total}] {label}")
 
+    def _on_tune_progress(self, done, total, label, elapsed):
+        self._progress.setRange(0, total); self._progress.setValue(done)
+        remaining = max(total - done, 0); eta = (elapsed / done * remaining) if done else 0
+        self.statusBar().showMessage(f"[{done}/{total}] {label} · осталось примерно {eta:.0f} с")
+
+    def _on_tune_done(self, tuning_results):
+        worker = self._tune_worker
+        if worker is None:
+            self._on_failed("Подбор завершён без рабочего потока")
+            return
+        # Final fitting is deliberately delegated to another worker: run() can
+        # include expensive LOGO folds and must never execute in the GUI thread.
+        method = worker.method
+        self._progress.setRange(0, max(len(tuning_results), 1))
+        self._progress.setValue(0)
+        self.statusBar().showMessage("Подбор завершён, выполняется итоговое обучение…")
+        self._final_tune_worker = FinalTuneWorker(
+            method, tuning_results, worker.dataset, worker.synth_cfg, worker.seed,
+            fixed=worker.fixed,
+        )
+        self._final_tune_worker.progress.connect(self._on_progress)
+        self._final_tune_worker.finished_ok.connect(self._on_final_tune_done)
+        self._final_tune_worker.failed.connect(self._on_failed)
+        self._final_tune_worker.finished.connect(self._on_final_tune_thread_finished)
+        self._final_tune_worker.start()
+
+    def _on_tune_thread_finished(self):
+        worker = self._tune_worker
+        if worker is not None:
+            worker.deleteLater()
+            self._tune_worker = None
+
+    def _on_final_tune_done(self, result):
+        self._on_done(result)
+
+    def _on_final_tune_thread_finished(self):
+        worker = self._final_tune_worker
+        if worker is not None:
+            worker.deleteLater()
+            self._final_tune_worker = None
+
+    def _stop_current(self):
+        worker = next((candidate for candidate in (
+            self._tune_worker, getattr(self, "_final_tune_worker", None), self._worker)
+                       if candidate is not None and candidate.isRunning()), None)
+        if worker is not None and worker.isRunning():
+            worker.cancel(); self.statusBar().showMessage("Остановка запрошена: текущий шаг будет завершён безопасно…")
+
     def _on_done(self, result):
         self._run_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
         self._progress.setRange(0, 1)
         self._progress.setValue(1)
         self.statusBar().showMessage("Готово")
@@ -679,6 +905,10 @@ class MainWindow(QMainWindow):
 
     def _on_failed(self, msg):
         self._run_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
+        if getattr(self, "_final_tune_worker", None) is not None and not self._final_tune_worker.isRunning():
+            self._final_tune_worker.deleteLater()
+            self._final_tune_worker = None
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
         self.statusBar().showMessage(f"Ошибка: {msg}")
@@ -710,6 +940,16 @@ class MainWindow(QMainWindow):
             if table.empty: continue
             tab = QWidget()
             layout = QVBoxLayout(tab)
+            tuning = result.metadata.get("tuning", {}).get(tkey)
+            if tuning:
+                best = QLabel(
+                    "Подбор завершён. Лучшие параметры: "
+                    + ", ".join(f"{k}={v}" for k, v in tuning["best_parameters"].items())
+                    + f"\nПроверено комбинаций: {tuning['combinations']} · время: {tuning['elapsed_seconds']:.1f} с"
+                    + "\nВыбор (LOGO): " + ", ".join(f"{k}={v:.4g}" for k, v in tuning["selection_metrics"].items())
+                    + "\nНезависимая вложенная LOGO: " + ", ".join(f"{k}={v:.4g}" for k, v in tuning["independent_metrics"].items())
+                )
+                best.setWordWrap(True); layout.addWidget(best)
             layout.addWidget(self._metrics_table(table))
             notes = reporting.model_notes(result, tkey)
             if notes:
