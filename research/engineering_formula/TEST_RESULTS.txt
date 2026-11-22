@@ -1,0 +1,15 @@
+test_formula_arithmetic_and_domain (test_formula_search.FormulaSearchTests.test_formula_arithmetic_and_domain) ... ok
+test_logo_groups_and_held_target_independence (test_formula_search.FormulaSearchTests.test_logo_groups_and_held_target_independence) ... ok
+test_nested_selection_does_not_see_outer_target (test_formula_search.FormulaSearchTests.test_nested_selection_does_not_see_outer_target) ... ok
+test_numerical_ties_prefer_fewer_features (test_formula_search.FormulaSearchTests.test_numerical_ties_prefer_fewer_features) ... ok
+test_reproducible_and_trf_improves_original_q_sse (test_formula_search.FormulaSearchTests.test_reproducible_and_trf_improves_original_q_sse) ... ok
+test_rounding_recalibrates_only_on_train (test_formula_search.FormulaSearchTests.test_rounding_recalibrates_only_on_train) ... ok
+test_saved_results_and_oof_metrics (test_formula_search.FormulaSearchTests.test_saved_results_and_oof_metrics) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.538s
+
+OK
+
+Full rerun reproducibility: PASS (all coefficients, metrics, selection and CSV identical; elapsed timings excluded).
+predictions.csv SHA256: 8c83fbf03b564cab26b59982ca40e2097115d1f25ce00b0ee2eb3670495a3f8a
